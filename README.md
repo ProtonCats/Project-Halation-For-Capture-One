@@ -48,7 +48,7 @@ $ ./run
 **In short**, for anyone used to building from source:
 
 ```sh
-git clone <repository-url> halation
+git clone https://github.com/ProtonCats/Project-Halation-For-Capture-One.git halation
 cd halation
 ./setup "<path to the Capture One installer>"
 ./run
@@ -100,7 +100,7 @@ For GPU image processing, your graphics driver's OpenCL support must be installe
 ### 3. Download Halation
 
 ```sh
-git clone <repository-url> halation
+git clone https://github.com/ProtonCats/Project-Halation-For-Capture-One.git halation
 cd halation
 ```
 
@@ -254,7 +254,7 @@ LICENSES/   licence texts
 
 ## Legal
 
-**Disclaimer.** *Draft wording, pending the maintainer's sign-off.*
+**Disclaimer.**
 
 - **Independent.** Halation is a user-made project. It is not affiliated with, endorsed by or sponsored by Capture One A/S, Phase One or Fujifilm.
 - **Your own licensed copy.** You need your own licensed copy of Capture One. Halation never downloads, mirrors or links the software, and never touches sign-in, trial or activation.

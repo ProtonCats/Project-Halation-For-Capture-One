@@ -1,7 +1,7 @@
 version = 1
 
 [[annotations]]
-path = ["LICENSE", "REUSE.toml", "README.md", "CONTRIBUTING.md", "docs/**", "profiles/captureone/profile.json"]
+path = ["LICENSE", "REUSE.toml", "README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/**", ".github/ISSUE_TEMPLATE/**", ".github/pull_request_template.md", "profiles/captureone/profile.json"]
 SPDX-FileCopyrightText = "2026 ProtonCats and contributors"
 SPDX-License-Identifier = "MIT"
 
