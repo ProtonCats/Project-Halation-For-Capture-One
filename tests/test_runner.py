@@ -16,7 +16,6 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 from core import setup as profiles
 
-REQUIRE_TUNNEL = profiles.require_tunnel
 
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("core.runner", REPO / "core/runner.py")
@@ -62,7 +61,6 @@ class Sandbox(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(dir=REPO)
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.enterContext(patch.object(profiles, "require_tunnel", return_value=None))
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
 
 
@@ -170,31 +168,6 @@ class RunnerOperations(Sandbox):
             runner.fetch("fixture-source", "pinned-commit", dest, self.env, depth=2)
             runner.fetch("fixture-source", "pinned-commit", dest, self.env, depth=2)
         self.assertEqual(history.read_text(), "pinned-commit\n")
-
-    def test_source_download_boundaries_refuse_without_a_tunnel(self):
-        pins = json.loads((REPO / "core/runner/ge-proton11-12.json").read_bytes())
-        sent = self.root / "request-sent"
-        def execute(cmd, **kwargs):
-            if cmd[0] == "curl" or (cmd[0] == "git" and cmd[1] in ("fetch", "clone")):
-                sent.write_text("unexpected network request")
-        for stage in ("fetch", "clone", "xml"):
-            with self.subTest(stage=stage):
-                work = self.root / stage
-                work.mkdir()
-                if stage == "xml":
-                    (work / "runner-src/.git").mkdir(parents=True)
-                with patch.object(profiles, "require_tunnel", REQUIRE_TUNNEL), \
-                     patch.object(profiles.px, "tunnel_up", return_value=False), \
-                     patch.object(profiles.px.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="dev wg0")), \
-                     patch.object(runner, "run", side_effect=execute):
-                    with self.assertRaisesRegex(SystemExit, "tunnel"):
-                        if stage == "fetch":
-                            runner.fetch("fixture-source", "pin", work / "wine", self.env)
-                        else:
-                            with patch.object(runner, "fetch"):
-                                runner.prepare(pins, work, self.env, self.log)
-                self.assertFalse(sent.exists())
-                self.assertFalse((work / ".prepared").exists())
 
     def test_preparation_records_completion_and_preserves_a_prepared_tree(self):
         pins = json.loads((REPO / "core/runner/ge-proton11-12.json").read_text())
@@ -473,6 +446,14 @@ class RunnerOperations(Sandbox):
             "replaces": hashlib.sha256(b"original").hexdigest()})
 
 
+class SourceDownloads(Sandbox):
+    def test_source_fetch_never_reads_the_network_route(self):
+        with patch.object(profiles.px.subprocess, "run", side_effect=AssertionError("route read")), \
+             patch.object(runner, "run") as run:
+            runner.fetch("fixture-source", "pin", self.root / "wine", {})
+        self.assertIn(["git", "fetch", "-q", "--depth=1", "fixture-source", "pin"], [c.args[0] for c in run.call_args_list])
+
+
 class FetchRunner(Sandbox):
     def setUp(self):
         super().setUp()
@@ -523,53 +504,15 @@ class FetchRunner(Sandbox):
     def fetch(self):
         return runner.main(["fetch", "--pins", str(self.pins), "--dest", str(self.dest)])
 
+    def test_fetch_never_reads_the_network_route(self):
+        with patch.object(profiles.px.subprocess, "run", side_effect=AssertionError("route read")):
+            self.assertEqual(self.fetch(), 0)
+
     def assert_refused(self, message):
         with self.assertRaisesRegex(SystemExit, message) as exc:
             self.fetch()
         self.assertTrue(exc.exception.code)
         self.assertEqual(list(self.dest.iterdir()), [])
-
-    def test_missing_tunnel_refuses_before_request_or_destination_writes(self):
-        self.opener.side_effect = AssertionError("request started without a tunnel")
-        for exists in (False, True):
-            with self.subTest(existing_destination=exists):
-                self.dest = self.root / ("existing" if exists else "absent")
-                if exists:
-                    self.dest.mkdir()
-                before = self.dest.stat().st_mtime_ns if exists else None
-                with patch.object(profiles, "require_tunnel", REQUIRE_TUNNEL), \
-                     patch.object(profiles.px, "tunnel_up", return_value=False), \
-                     patch.object(profiles.px.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="dev wg0")):
-                    with self.assertRaisesRegex(SystemExit, "tunnel") as error:
-                        self.fetch()
-                self.assertTrue(error.exception.code)
-                self.assertEqual(self.dest.exists(), exists)
-                if exists:
-                    self.assertEqual(list(self.dest.iterdir()), [])
-                    self.assertEqual(self.dest.stat().st_mtime_ns, before)
-
-    def test_archive_request_rechecks_the_tunnel_after_checksum(self):
-        requests = []
-        def open_release(url, **kwargs):
-            requests.append(url.rsplit("/", 1)[-1])
-            return self.open_release(url, **kwargs)
-        self.opener.side_effect = open_release
-        with patch.object(profiles, "require_tunnel", REQUIRE_TUNNEL), \
-             patch.object(profiles.px, "tunnel_up", side_effect=[True, False]), \
-             patch.object(profiles.px.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="dev wg0")):
-            self.assert_refused("tunnel")
-        self.assertEqual(requests, [self.asset + ".sha512sum"])
-
-    def test_redirect_rechecks_the_tunnel_before_following(self):
-        request = runner.urllib.request.Request("https://example.invalid/start")
-        with patch.object(profiles, "require_tunnel", REQUIRE_TUNNEL), \
-             patch.object(profiles.px.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="dev wg0")):
-            with patch.object(profiles.px, "tunnel_up", return_value=False):
-                with self.assertRaisesRegex(SystemExit, "tunnel"):
-                    runner.TunnelRedirect().redirect_request(request, None, 302, "Found", {}, "https://example.invalid/next")
-            with patch.object(profiles.px, "tunnel_up", return_value=True):
-                redirected = runner.TunnelRedirect().redirect_request(request, None, 302, "Found", {}, "https://example.invalid/next")
-        self.assertEqual(redirected.full_url, "https://example.invalid/next")
 
     def test_verified_install_preserves_links_permissions_and_checksum_formats(self):
         for asset, binary in ((None, False), (self.tag + "-x86_64", True)):

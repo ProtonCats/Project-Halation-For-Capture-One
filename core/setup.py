@@ -177,12 +177,6 @@ def guarded(prefix, relative, action, allow_creation=False):
             die("install folder changed during a Windows step")
 
 
-def require_tunnel():
-    route = px.subprocess.run(["ip", "route", "get", "1.1.1.1"], capture_output=True, text=True)
-    if route.returncode or not px.tunnel_up(route.stdout):
-        die("downloads require a default route through a tunnel")
-
-
 class ProfileRedirect(urllib.request.HTTPRedirectHandler):
     def __init__(self, allowed):
         self.allowed = allowed
@@ -190,7 +184,6 @@ class ProfileRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if newurl not in self.allowed:
             die("download redirect is not listed in the profile")
-        require_tunnel()
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -210,7 +203,6 @@ def prerequisites(items, cache):
             missing.append((item, path))
     if not missing:
         return paths
-    require_tunnel()
     created = []
     parent = cache.parent
     while not parent.exists():
@@ -223,11 +215,9 @@ def prerequisites(items, cache):
             opener = urllib.request.build_opener(ProfileRedirect({item["url"] for item in items}))
             staged = []
             for item, path in missing:
-                require_tunnel()
                 partial = Path(tmp) / path.name
                 with opener.open(item["url"], timeout=60) as response, partial.open("wb") as out:
                     while True:
-                        require_tunnel()
                         block = response.read(1 << 20)
                         if not block:
                             break

@@ -33,7 +33,6 @@ class Entry(unittest.TestCase):
         self.enterContext(patch.object(en.runner, "our_patches", return_value=[(self.patch_file, ["sample"])]))
         self.enterContext(patch.object(en.shutil, "which", return_value="available"))
         self.enterContext(patch.object(en.runner, "llvm_ar", return_value="available"))
-        self.enterContext(patch.object(en.profiles, "require_tunnel", return_value=None))
         self.enterContext(patch.object(en.runner, "main", side_effect=self.stage))
         self.enterContext(patch.object(en.profiles, "main", side_effect=self.stage))
         self.stdout = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -158,7 +157,7 @@ class Entry(unittest.TestCase):
         self.assertEqual(self.setup(), 2)
         self.assertTrue(self.base.exists())
 
-    def test_preflight_refuses_missing_tunnel_or_tools_before_work(self):
+    def test_preflight_refuses_missing_tools_before_work(self):
         self.forbid_work = True
         with patch.object(en.shutil, "which", side_effect=lambda n: None if n in ("autoconf", "autoheader") else "ok"), \
              patch.object(en.runner, "llvm_ar", return_value=None):
@@ -166,10 +165,10 @@ class Entry(unittest.TestCase):
         for name in ("autoconf", "autoheader", "llvm-ar"):
             self.assertIn(name, self.stderr.getvalue())
         self.assertFalse(self.data.exists())
-        with patch.object(en.profiles, "require_tunnel", side_effect=ValueError("tunnel is down")):
-            self.assertEqual(self.setup(), 2)
-        self.assertIn("tunnel", self.stderr.getvalue())
-        self.assertFalse(self.data.exists())
+
+    def test_setup_needs_no_ip_tool(self):
+        with patch.object(en.shutil, "which", side_effect=lambda n: None if n == "ip" else "ok"):
+            self.assertEqual(self.setup(), 0)
 
     def test_setup_runs_unix_after_pe_and_verifies_final_pair_on_resume(self):
         unix_patch = self.root / "0006.patch"
@@ -235,12 +234,12 @@ class Entry(unittest.TestCase):
             self.assertEqual(self.setup(), 2)
             self.assertEqual(calls, [])
 
-    def test_run_forwards_profile_tunnel_program_and_extra_arguments(self):
+    def test_run_forwards_profile_program_and_extra_arguments(self):
         self.assertEqual(self.setup(), 0)
         def launch(args):
             boundary = args.index("--")
             options = dict(zip(args[1:boundary - 1:2], args[2:boundary - 1:2]))
-            self.assertEqual(args[boundary - 1], "--require-tunnel")
+            self.assertNotIn("--require-tunnel", args)
             self.assertEqual(options["--profile"], str(self.profile))
             self.assertEqual(options["--prefix"], str(self.data / "pfx"))
             self.assertEqual(options["--runner"], str(self.data / "runners/patched"))
@@ -283,8 +282,6 @@ class Entry(unittest.TestCase):
         self.assertEqual(self.setup(), 0)
         received = self.root / "launch-environment.json"
         def execute(cmd, **kwargs):
-            if cmd[0] == "ip":
-                return subprocess.CompletedProcess(cmd, 0, stdout="1.1.1.1 dev wg0")
             if cmd[0] == "umu-run":
                 received.write_text(json.dumps(kwargs["env"]))
                 return subprocess.CompletedProcess(cmd, 0)

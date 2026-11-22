@@ -40,7 +40,7 @@ class Setup(unittest.TestCase):
             "installer_args": ["/quiet"], "install_dir": "drive_c/Program Files/Example",
         }
         self.write_profile()
-        self.route, self.events = "1.1.1.1 dev wg0", []
+        self.events = []
         self.registry = {("HKCU\\Software\\Wine\\Direct3D", "OldValue"): "old"}
         self.types = {}
         self.tamper, self.fail_step = None, False
@@ -73,8 +73,6 @@ class Setup(unittest.TestCase):
         return io.BytesIO(data)
 
     def process(self, cmd, **kwargs):
-        if cmd[0] == "ip":
-            return subprocess.CompletedProcess(cmd, 0, stdout=self.route)
         if Path(cmd[0]).name == "wineserver":
             return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "umu-run":
@@ -191,9 +189,9 @@ class Setup(unittest.TestCase):
         marker = json.loads((self.prefix / st.MARKER).read_text())
         self.assertTrue(st.unchanged(self.install, marker["install_tree"]))
 
-    def test_missing_tunnel_refuses_before_prefix_creation(self):
-        self.route = "1.1.1.1 dev eth0"
-        self.assert_pristine_refusal("require.*tunnel")
+    def test_setup_never_reads_the_network_route(self):
+        self.assertEqual(self.apply(), 0)
+        self.assertNotIn("ip", [c.args[0][0] for c in st.px.subprocess.run.call_args_list])
 
     def test_all_checksums_are_verified_before_creating_or_running_anything(self):
         for later in (False, True):
@@ -318,22 +316,14 @@ class Setup(unittest.TestCase):
         st.px.record_runner(self.prefix, 300, "newer")
         self.assert_pristine_refusal("forward only")
 
-    def test_unlisted_redirects_and_tunnel_loss_are_refused(self):
+    def test_unlisted_redirects_are_refused_and_listed_ones_followed(self):
         handler = st.ProfileRedirect({self.url})
         request = st.urllib.request.Request(self.url)
         with self.assertRaisesRegex(SystemExit, "not listed"):
             handler.redirect_request(request, None, 302, "redirect", {}, "https://elsewhere.invalid/runtime.exe")
-        self.route = "1.1.1.1 dev eth0"
-        with self.assertRaisesRegex(SystemExit, "tunnel"):
-            handler.redirect_request(request, None, 302, "redirect", {}, self.url)
+        followed = handler.redirect_request(request, None, 302, "redirect", {}, self.url)
+        self.assertEqual(followed.full_url, self.url)
         self.assertEqual(self.events, [])
-        self.route = "1.1.1.1 dev wg0"
-        def lose_tunnel(url, **kwargs):
-            self.route = "1.1.1.1 dev eth0"
-            return io.BytesIO(b"runtime")
-        with patch.object(st.urllib.request, "build_opener", return_value=SimpleNamespace(open=lose_tunnel)):
-            self.assert_pristine_refusal("tunnel")
-
 
     def test_program_is_relative_and_cannot_escape_install_dir(self):
         for value in ("../outside.exe", "bin/../app.exe", "/app.exe", "", ".", "C:\\app.exe", "bin\\app.exe", 1):

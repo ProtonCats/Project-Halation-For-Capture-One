@@ -4,14 +4,14 @@
 """Create and use one persistent Wine prefix with a Proton runner, through umu.
 
   prefix.py create --runner DIR --prefix DIR
-  prefix.py run    --runner DIR --prefix DIR [--profile FILE] [--watch DIR] [--wined3d] [--require-tunnel] -- PROGRAM [ARGS...]
+  prefix.py run    --runner DIR --prefix DIR [--profile FILE] [--watch DIR] [--wined3d] -- PROGRAM [ARGS...]
   prefix.py status --prefix DIR
 
 The prefix records the runner that last used it; a runner older than that is refused, because an older Proton
 rewrites a newer prefix. A prefix counts as ready once its registry holds the Program Files path; Proton's own
 creation exits 1 by design, so exit codes decide nothing there. run starts the program with umu-run, the given
 runner and no runtime update, on X11; --watch hashes a directory before and after with treehash.py and fails the
-run when anything in it changed. --require-tunnel refuses to start unless the default route goes through a tunnel.
+run when anything in it changed.
 With --profile, install_dir inside the prefix is watched by default; --watch overrides it.
 """
 import argparse
@@ -27,7 +27,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MARKER = ".runner.json"
-TUNNELS = ("tun", "wg", "proton", "tailscale", "ppp")
 
 
 def die(msg, code=2):
@@ -128,12 +127,6 @@ def validate_environment(values):
     return values
 
 
-def tunnel_up(route_text):
-    words = route_text.split()
-    dev = words[words.index("dev") + 1] if "dev" in words and words.index("dev") + 1 < len(words) else ""
-    return dev.startswith(TUNNELS)
-
-
 def checked_version(runner, prefix):
     stamp, name = runner_version(runner)
     if not forward_ok(prefix, stamp):
@@ -197,10 +190,6 @@ def run(a):
                 watch = str(path)
         except (OSError, ValueError, TypeError) as ex:
             die(f"invalid launch profile: {ex}")
-    if a.require_tunnel:
-        route = subprocess.run(["ip", "route", "get", "1.1.1.1"], capture_output=True, text=True).stdout
-        if not tunnel_up(route):
-            die("the default route goes through no tunnel (--require-tunnel)")
     record_runner(prefix, stamp, name)
     env = environment(runner, prefix, a.wined3d)
     env.update(extra)
@@ -242,7 +231,6 @@ def main(argv):
     ap.add_argument("--display", choices=["x11", "wayland"], default="x11")
     ap.add_argument("--watch")
     ap.add_argument("--wined3d", action="store_true")
-    ap.add_argument("--require-tunnel", action="store_true")
     ap.add_argument("--opencl-vendors", help="run: OCL_ICD_VENDORS for the run, unless already set")
     cut = argv.index("--") if "--" in argv else len(argv)
     a = ap.parse_args(argv[:cut])

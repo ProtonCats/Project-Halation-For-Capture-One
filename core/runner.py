@@ -79,20 +79,6 @@ def run(cmd, cwd=None, env=None, log=None, check=True, timeout=None):
     return r.returncode
 
 
-def network_request(action, *args, **kwargs):
-    if __package__:
-        from .setup import require_tunnel
-    else:
-        from setup import require_tunnel
-    require_tunnel()
-    return action(*args, **kwargs)
-
-
-class TunnelRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return network_request(super().redirect_request, req, fp, code, msg, headers, newurl)
-
-
 def llvm_ar():
     for name in ["llvm-ar"] + [f"llvm-ar-{v}" for v in range(30, 14, -1)]:
         if shutil.which(name):
@@ -121,7 +107,7 @@ def fetch(url, commit, dest, env, depth=1):
         return
     dest.mkdir(parents=True, exist_ok=True)
     run(["git", "init", "-q"], cwd=dest, env=env)
-    network_request(run, ["git", "fetch", "-q", f"--depth={depth}", url, commit], cwd=dest, env=env)
+    run(["git", "fetch", "-q", f"--depth={depth}", url, commit], cwd=dest, env=env)
 
 
 def extract_runner(archive, tree, tag):
@@ -176,8 +162,8 @@ def fetch_runner(args):
             die(f"{target} exists; refusing to overwrite")
         archive_name = f"{name}.tar.gz"
         base = f"{pins['ge_url'].rstrip('/')}/releases/download/{tag}"
-        opener = urllib.request.build_opener(TunnelRedirect())
-        with network_request(opener.open, f"{base}/{name}.sha512sum", timeout=60) as response:
+        opener = urllib.request.build_opener()
+        with opener.open(f"{base}/{name}.sha512sum", timeout=60) as response:
             lines = response.read().decode("ascii").splitlines()
         sums = []
         for line in lines:
@@ -191,7 +177,7 @@ def fetch_runner(args):
             work = Path(tmp)
             partial = work / "archive.part"
             digest = hashlib.sha512()
-            with network_request(opener.open, f"{base}/{archive_name}", timeout=60) as response, partial.open("wb") as out:
+            with opener.open(f"{base}/{archive_name}", timeout=60) as response, partial.open("wb") as out:
                 while block := response.read(1 << 20):
                     out.write(block)
                     digest.update(block)
@@ -224,14 +210,14 @@ def prepare(pins, work, env, log):
     fetch(pins["staging_url"], pins["staging_commit"], staging, env)
     run(["git", "checkout", "-q", pins["staging_commit"]], cwd=staging, env=env)
     if not (ge / ".git").exists():
-        network_request(run, ["git", "clone", "-q", "--depth", "1", "--branch", pins["ge_tag"], "--no-recurse-submodules",
+        run(["git", "clone", "-q", "--depth", "1", "--branch", pins["ge_tag"], "--no-recurse-submodules",
              pins["ge_url"], str(ge)], env=env)
     run(["git", "checkout", "-q", "-f", pins["wine_commit"]], cwd=wine, env=env)
     run(["git", "revert", "--no-commit", pins["wine_revert"]], cwd=wine, env=env, log=log)
     run(["autoconf", "-f"], cwd=wine, env=env, log=log)
     run(["autoheader", "-f"], cwd=wine, env=env, log=log)
     for xml in ("vk.xml", "video.xml"):
-        network_request(run, ["curl", "-sSf", "-o", xml, f"{pins['vulkan_docs']}/{xml}"], cwd=wine, env=env, log=log)
+        run(["curl", "-sSf", "-o", xml, f"{pins['vulkan_docs']}/{xml}"], cwd=wine, env=env, log=log)
     run([sys.executable, "dlls/winevulkan/make_vulkan", "-x", "vk.xml", "-X", "video.xml"], cwd=wine,
         env={**env, "XDG_CACHE_HOME": str(work / "cache")}, log=log)
     run(["tools/make_specfiles"], cwd=wine, env=env, log=log)
@@ -552,7 +538,7 @@ def prepare_unix(pins, work, env, log, identity):
                        '\npushd wineopenxr\napply_all_in_dir "../patches/wineopenxr/"\npopd\n' + body)
     run(["bash", str(wrapper)], cwd=source, env=env, log=log)
     for xml, expected in spec["xml_sha256"].items():
-        network_request(run, ["curl", "-sSf", "-o", xml, f"{pins['vulkan_docs']}/{xml}"],
+        run(["curl", "-sSf", "-o", xml, f"{pins['vulkan_docs']}/{xml}"],
                         cwd=wine, env=env, log=log)
         if sha256(wine / xml) != expected:
             die(f"Unix XML hash mismatch: {xml}")

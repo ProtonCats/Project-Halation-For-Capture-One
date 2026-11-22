@@ -57,12 +57,11 @@ def setup_main(argv=None):
     parser.add_argument("--data")
     args = parser.parse_args(argv)
     try:
-        missing = [name for name in runner.TOOLS + ["umu-run", "ip"] if not shutil.which(name)]
+        missing = [name for name in runner.TOOLS + ["umu-run"] if not shutil.which(name)]
         if not runner.llvm_ar():
             missing.append("llvm-ar")
         if missing:
             raise ValueError("missing required tools: " + ", ".join(missing))
-        profiles.require_tunnel()
         installer = Path(args.installer).resolve()
         if not installer.is_file():
             raise ValueError("a local installer file is required")
@@ -212,7 +211,7 @@ def run_main(argv=None):
                             "--profile", str(PROFILE), "--display", args.display,
                             *(["--opencl-vendors", str(vendors)] if vendors else []),
                             *(["--wined3d"] if args.renderer == "wined3d" else []),
-                            "--require-tunnel", "--", str(program), *argv[boundary + 1:]])
+                            "--", str(program), *argv[boundary + 1:]])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"run: {exc}", file=sys.stderr)
         return 2

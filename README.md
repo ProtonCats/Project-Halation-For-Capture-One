@@ -1,9 +1,11 @@
 <!-- rumdl-disable MD041 -->
 ![Halation: a Linux compatibility layer for Capture One. Clone, setup, run.](docs/banner.svg)
 
+# Run Capture One on Linux
+
 **[Quick start](#quick-start)** · **[How it works](#how-it-works)** · **[Ground rules](#ground-rules)** · **[Status](#status)** · **[Contributing](#contributing)** · **[Reference](docs/reference.md)**
 
-Halation runs the Windows edition of Capture One on a Linux desktop. You bring the installer you downloaded; `setup` builds a pinned GE-Proton runner with a small set of Wine fixes, creates a Windows prefix and installs the app into it, and `run` starts it.
+Halation runs the Windows edition of Capture One on a Linux desktop, through Proton and Wine. You bring the installer you downloaded; `setup` builds a pinned GE-Proton runner with a small set of Wine fixes, creates a Windows prefix and installs the app into it, and `run` starts it.
 
 The app itself is never modified, and every Wine fix comes with a small program that shows the bug without Capture One.
 
@@ -38,6 +40,7 @@ $ ./run
 - [Ground rules](#ground-rules)
 - [Wine patches](#wine-patches)
 - [Status](#status)
+- [Questions](#questions)
 - [Contributing](#contributing)
 - [Layout](#layout)
 - [Legal](#legal)
@@ -47,9 +50,8 @@ $ ./run
 **You need:**
 
 - x86-64 Linux with a Vulkan driver (developed on NVIDIA);
-- [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) (`umu-run`), Python 3 and `ip`;
+- [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) (`umu-run`) and Python 3;
 - the build tools for the Wine fixes: git, curl, autoconf, autoheader, perl, bison, flex, make, gcc, clang, lld and llvm-ar, plus the development packages listed in the [reference](docs/reference.md#building-the-runner);
-- a VPN tunnel as the default route: `setup` and `run` refuse to start without one;
 - the Capture One installer for Windows, downloaded from the official site.
 
 **Then:**
@@ -119,6 +121,24 @@ Patches are LGPL-2.1-or-later, as Wine is, and are written to go upstream to Win
 - Edits show more slowly than on Windows: 250 to 395 ms from a slider change to the preview.
 - True fullscreen can flicker (seen with adaptive sync on).
 
+## Questions
+
+### Is there a Linux version of Capture One?
+
+Not a native one: Capture One's desktop editions are for Windows and macOS. Halation runs the Windows edition on Linux through Proton and Wine, with no virtual machine and no Windows installation.
+
+### Do I need a licence?
+
+Yes, your own licensed copy of Capture One. Halation installs the copy you downloaded and leaves sign-in and activation to the app.
+
+### Why not plain Wine?
+
+Capture One trips over several Wine bugs: colour profile lookups, file dialogs, helper windows and input devices. Halation pins a GE-Proton release, adds fixes for those bugs, and sets up the prefix the way the app needs it.
+
+### Which distributions and desktops work?
+
+Tested so far on Nobara 44 (Fedora-based) with an NVIDIA GPU, on Hyprland through XWayland. Other x86-64 distributions with a Vulkan driver, and desktops such as KDE Plasma and GNOME, are untested; a report from yours helps.
+
 ## Contributing
 
 Halation is meant to be built on. Branches, fixes, profiles for other apps and plain test reports are all welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how, and every commit carries a DCO sign-off. Everyone follows the [Code of Conduct](.github/CODE_OF_CONDUCT.md).
@@ -151,4 +171,4 @@ LICENSES/   licence texts
 
 **Licence.** Own code is MIT; Wine patches are LGPL-2.1-or-later, as Wine is; the Code of Conduct is CC BY 4.0. Each file carries an SPDX header, and `REUSE.toml` covers the rest.
 
-**Trademarks.** Capture One is a trademark of its owner, used here only to say what Halation runs. Halation's name, logo and repository name carry no Capture One, Phase One or Fujifilm marks.
+**Trademarks.** Capture One is a trademark of its owner, used here only to say what Halation runs. Halation's name and logo carry no Capture One, Phase One or Fujifilm marks; the repository name uses "Capture One" only to say what Halation is for.

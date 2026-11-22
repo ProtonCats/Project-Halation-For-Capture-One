@@ -195,13 +195,6 @@ class Prefix(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 px.validate_environment({name: "override"})
 
-    def test_tunnel_route(self):
-        self.assertTrue(px.tunnel_up("1.1.1.1 dev proton0 table 245447468 src 10.2.0.2 uid 1000"))
-        self.assertFalse(px.tunnel_up("1.1.1.1 via 192.168.9.1 dev enp12s0 src 192.168.9.34 uid 1000"))
-        self.assertFalse(px.tunnel_up(""))
-
-
-class PrefixOperations(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=REPO)
         self.addCleanup(self.tmp.cleanup)
@@ -212,7 +205,7 @@ class PrefixOperations(unittest.TestCase):
         self.prefix = self.root / "prefix"
         self.prefix.mkdir()
         self.args = SimpleNamespace(runner=str(self.runner), prefix=str(self.prefix), program=["sample.exe", "a b"],
-                                    watch=None, require_tunnel=False, wined3d=False)
+                                    watch=None, wined3d=False)
         self.command = self.enterContext(patch.object(px.subprocess, "run"))
         self.command.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         self.enterContext(patch.object(px.shutil, "which", return_value="available"))
@@ -264,7 +257,7 @@ class PrefixOperations(unittest.TestCase):
         self.assertEqual(exc.exception.code, 1)
         self.assertFalse((self.prefix / px.MARKER).exists())
 
-    def test_run_rejects_missing_program_unready_prefix_and_no_tunnel(self):
+    def test_run_rejects_missing_program_and_unready_prefix(self):
         self.args.program = []
         with self.assertRaises(SystemExit):
             px.run(self.args)
@@ -272,21 +265,22 @@ class PrefixOperations(unittest.TestCase):
         with self.assertRaises(SystemExit):
             px.run(self.args)
         self.command.assert_not_called()
-        self.make_ready()
-        self.args.require_tunnel = True
-        self.command.return_value = subprocess.CompletedProcess([], 0, stdout="1.1.1.1 dev eth0", stderr="")
-        with self.assertRaises(SystemExit):
-            px.run(self.args)
-        self.assertEqual(self.command.call_count, 1)
-        self.assertEqual(self.command.call_args.args[0][:3], ["ip", "route", "get"])
         self.assertFalse((self.prefix / px.MARKER).exists())
+
+    def test_run_has_no_tunnel_option_and_never_reads_the_route(self):
+        self.make_ready()
+        with self.assertRaises(SystemExit) as exc:
+            px.main(["run", "--runner", str(self.runner), "--prefix", str(self.prefix), "--require-tunnel",
+                     "--", "sample.exe"])
+        self.assertEqual(exc.exception.code, 2)
+        self.command.assert_not_called()
+        self.assertEqual(px.run(self.args), 0)
+        self.assertEqual([c.args[0][0] for c in self.command.call_args_list], ["umu-run"])
 
     def test_watch_checks_even_a_failed_program_and_returns_change_exit(self):
         self.make_ready()
         self.args.watch = str(self.root / "install")
-        self.args.require_tunnel = True
         self.command.side_effect = [
-            subprocess.CompletedProcess([], 0, stdout="1.1.1.1 dev wg0"),
             subprocess.CompletedProcess([], 0),
             subprocess.CompletedProcess([], 7),
             subprocess.CompletedProcess([], 1, stdout="changed sample.dll sha256\n"),
@@ -294,7 +288,7 @@ class PrefixOperations(unittest.TestCase):
         with patch.object(px.tempfile, "tempdir", str(self.root)), self.assertRaises(SystemExit) as exc:
             px.run(self.args)
         self.assertEqual(exc.exception.code, 3)
-        route, snap, launch, compare = self.command.call_args_list
+        snap, launch, compare = self.command.call_args_list
         self.assertEqual(snap.args[0][2:4], ["snapshot", self.args.watch])
         self.assertEqual(compare.args[0][2:4], ["compare", self.args.watch])
         self.assertEqual(snap.args[0][-1], compare.args[0][-1])

@@ -5,9 +5,9 @@ How each piece of Halation works, for contributors and anyone curious. The front
 ## Setup and run
 
 - **Data folder.** `$XDG_DATA_HOME/halation-layer`, or the local data directory `halation-layer` when that variable is unset; `--data <dir>` selects another location for both commands.
-- **Before starting**, setup checks the tunnel and the required build dependencies. It reports each step's time and skips steps it has already verified.
+- **Before starting**, setup checks the required build dependencies. It reports each step's time and skips steps it has already verified.
 - **A partial or changed step** is refused, naming the folder to remove before retrying.
-- **Launch** requires the tunnel and checks the installed files before and after; arguments after `./run --` are passed to the program.
+- **Launch** checks the installed files before and after; arguments after `./run --` are passed to the program.
 
 ## Repro programs
 
@@ -68,7 +68,7 @@ core/runner.py assemble --mode unix --pins core/runner/ge-proton11-12.json --wor
 
 **Rebuilds.** Use a fresh work directory after changing mode, configure features, relevant source pins or patches. Comments, JSON formatting and pins used only by the other mode leave build identities unchanged.
 
-**Build tools.** Building needs git, curl, autoconf, autoheader, perl, bison, flex, make, gcc, clang, lld and llvm-ar, and installs none of them. The entry points also require umu-run and ip.
+**Build tools.** Building needs git, curl, autoconf, autoheader, perl, bison, flex, make, gcc, clang, lld and llvm-ar, and installs none of them. The entry points also require umu-run.
 
 **Pins.** The pins file names the Wine and wine-staging commits the runner was built from and the runner's own patches for each DLL we rebuild, so the result differs from the runner only by `patches/`.
 
@@ -79,7 +79,7 @@ core/runner.py assemble --mode unix --pins core/runner/ge-proton11-12.json --wor
 `python3 core/setup.py apply --profile <file> --runner <runner> --prefix <dir> --installer <local file>` applies a profile using the supplied installer. The minimal profile schema is documented in `core/setup.py`.
 
 - **Prerequisites** come only from profile URLs and must match their recorded SHA-256 before the prefix is created or any Windows code runs.
-- **Downloads and redirects** require a tunnel route; verified cached prerequisites can be reused offline.
+- **Redirects** are followed only to URLs the profile lists; verified cached prerequisites can be reused offline.
 - **`--dry-run`** prints the plan without writing anything.
 
 The measured profile is `profiles/captureone/profile.json`; its setting notes are beside it. Setup applies the Windows version, DLL overrides and registry values before running the local installer:
@@ -95,7 +95,6 @@ The measured profile is `profiles/captureone/profile.json`; its setting notes ar
 - **Run.** `run --runner <runner> --prefix <dir> -- <program>` starts a program in it (umu-run with that runner, no runtime update, X11). The program's working folder is the one `run` is started from.
 - **Runner versions.** The prefix remembers the newest runner it has seen and refuses an older one, since an older Proton rewrites a newer prefix. Recording an older runner never lowers that saved version.
 - **Watch.** `run --watch <dir>` hashes a folder before and after with `treehash.py` and exits 3 if anything in it changed; pointed at the app's install folder, that is the "install folder untouched" check.
-- **Tunnel.** `--require-tunnel` refuses to start unless the default route goes through a VPN tunnel.
 
 Add `--profile profiles/captureone/profile.json` to `run` to apply its launch environment, including the web view's `--disable-gpu` argument. A profile without an `environment` entry leaves the launch environment unchanged; profiles cannot override names beginning with WINE, PROTON, UMU, DXVK or STEAM_COMPAT_, any variable set by the runner environment, or GAMEID, VKD3D_SHADER_CACHE_PATH, PATH, LD_PRELOAD and LD_LIBRARY_PATH.
 
