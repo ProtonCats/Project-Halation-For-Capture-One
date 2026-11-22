@@ -1,0 +1,14 @@
+<!-- SPDX-FileCopyrightText: 2026 ProtonCats and contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <SelfContained>false</SelfContained>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <!-- The shared result writer needs System.Text.Json; extra assemblies would muddy a load probe. -->
+  <ItemGroup>
+    <Compile Remove="$(MSBuildThisFileDirectory)../common/Probe.cs" />
+  </ItemGroup>
+</Project>

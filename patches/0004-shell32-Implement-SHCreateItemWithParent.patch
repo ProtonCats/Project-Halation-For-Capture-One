@@ -1,0 +1,45 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+shell32: Implement SHCreateItemWithParent.
+
+Build the item from the parent ID list, or from the parent folder when no
+parent ID list is given, plus the child ID list, through the existing
+SHCreateShellItem, then return the requested interface. Wine returned
+E_NOTIMPL for every call.
+
+On Windows 10 (19045) every form tried returns the item with the right file
+system path (parent ID list, parent folder, both; IShellItem and IShellItem2),
+and an interface the item lacks gives E_NOINTERFACE. Shown by
+repro/p5b-dialog-com --item on Windows and on Wine 11.0 with and without this
+patch.
+
+diff --git a/dlls/shell32/shellitem.c b/dlls/shell32/shellitem.c
+index 93a60d63..b7168557 100644
+--- a/dlls/shell32/shellitem.c
++++ b/dlls/shell32/shellitem.c
+@@ -772,9 +772,22 @@ HRESULT WINAPI SHCreateItemFromIDList(PCIDLIST_ABSOLUTE pidl, REFIID riid, void
+ HRESULT WINAPI SHCreateItemWithParent(PCIDLIST_ABSOLUTE pidl_parent, IShellFolder *psf,
+                                 PCUITEMID_CHILD pidl, REFIID riid, void **ppv)
+ {
+-    FIXME("(%p, %p, %p, %s, %p)\n", pidl_parent, psf, pidl, debugstr_guid(riid), ppv);
++    IShellItem *item;
++    HRESULT hr;
+ 
+-    return E_NOTIMPL;
++    TRACE("(%p, %p, %p, %s, %p)\n", pidl_parent, psf, pidl, debugstr_guid(riid), ppv);
++
++    if (!ppv)
++        return E_INVALIDARG;
++    *ppv = NULL;
++
++    hr = SHCreateShellItem(pidl_parent, psf, pidl, &item);
++    if (FAILED(hr))
++        return hr;
++
++    hr = IShellItem_QueryInterface(item, riid, ppv);
++    IShellItem_Release(item);
++    return hr;
+ }
+ 
+ HRESULT WINAPI SHCreateItemInKnownFolder(REFKNOWNFOLDERID rfid, DWORD flags,

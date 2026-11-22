@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+# SPDX-License-Identifier: MIT
+"""Push one ref only after the leak check passes on exactly what will be pushed.
+
+Usage: push <remote> <ref>      (or <src>:<dst>; no force, no deletion, no other arguments)
+The remote's current value comes from ls-remote, and the checked sha itself is pushed with tag
+following and submodule pushes off, so nothing reaches the remote that the check did not see.
+Exit 0 pushed, 1 refused by the check, 2 on its own error; otherwise git push's own code.
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+ZERO = "0" * 40
+
+
+def die(msg):
+    print(f"push: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def out(*cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        die(f"{' '.join(cmd)}: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def full_ref(name):
+    r = subprocess.run(["git", "rev-parse", "--symbolic-full-name", name], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip().startswith("refs/") else None
+
+
+def main(argv):
+    if len(argv) != 2 or argv[1].startswith(("+", ":", "-")):
+        die("usage: push <remote> <ref>[:<dst>]  (no force, no deletion, no other arguments)")
+    remote, spec = argv
+    src, _, dst = spec.partition(":")
+    local_ref = full_ref(src)
+    if local_ref is None:
+        die(f"{src}: not a branch or tag")
+    dst = dst or local_ref
+    if not dst.startswith("refs/"):
+        dst = ("refs/tags/" if local_ref.startswith("refs/tags/") else "refs/heads/") + dst
+    local = out("git", "rev-parse", "--verify", local_ref)
+    listed = [l.split("\t") for l in out("git", "ls-remote", "--", remote, dst).splitlines()]
+    remote_sha = next((sha for sha, ref in listed if ref == dst), ZERO)
+    line = f"{local_ref} {local} {dst} {remote_sha}\n"
+    check = Path(__file__).resolve().parent / "prepush.py"
+    r = subprocess.run([sys.executable, str(check)], input=line, text=True)
+    if r.returncode:
+        print(f"push: refused, leak check exit {r.returncode}", file=sys.stderr)
+        return r.returncode
+    return subprocess.run(["git", "-c", "push.followTags=false", "push", "--no-verify", "--no-follow-tags",
+                           "--recurse-submodules=no", remote, f"{local}:{dst}"]).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

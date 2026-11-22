@@ -1,0 +1,69 @@
+{
+  "comment": "Inputs for rebuilding GE-Proton11-12's Wine DLLs with our patches. SPDX-License-Identifier: MIT",
+  "ge_tag": "GE-Proton11-12",
+  "ge_asset": "GE-Proton11-12-x86_64",
+  "ge_url": "https://github.com/GloriousEggroll/proton-ge-custom",
+  "wine_url": "https://github.com/ValveSoftware/wine",
+  "wine_commit": "fda79a585939fb7512dc220a11249f9ffe825fcf",
+  "wine_revert": "e813ca5771658b00875924ab88d525322e50d39f",
+  "staging_url": "https://github.com/wine-staging/wine-staging",
+  "staging_commit": "6cc805ea57132eeaf44764e9213823c9b8d0d300",
+  "vulkan_docs": "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Docs/v1.4.357/xml",
+  "base_patches": {
+    "shell32": [
+      {
+        "tree": "ge",
+        "path": "patches/wine-hotfixes/em-fixups/0001-winewayland-add-SNI-tray-icons-and-native-context-me.patch",
+        "include": [
+          "dlls/shell32/*",
+          "include/ntuser.h"
+        ]
+      },
+      {
+        "tree": "ge",
+        "path": "patches/wine-hotfixes/em-fixups/0002-winewayland-route-tray-balloons-through-desktop-notifications.patch",
+        "include": [
+          "dlls/shell32/*",
+          "include/ntuser.h"
+        ]
+      },
+      {
+        "tree": "staging",
+        "path": "patches/shell32-IconCache"
+      },
+      {
+        "tree": "staging",
+        "path": "patches/shell32-Toolbar_Bitmaps"
+      }
+    ],
+    "comdlg32": [
+      {
+        "tree": "staging",
+        "path": "patches/comdlg32-lpstrFileTitle"
+      }
+    ],
+    "mscms": []
+  },
+  "unix": {
+    "ge_commit": "f85547f0ea51ac356ab42b4de57b927b0044cc85",
+    "prep_path": "patches/protonprep-valve-staging.sh",
+    "prep_sha256": "e8c2c6d8adbabe37b75d131b7ecc5e7981b6b6b0730bf4a49d0de4704ad6c87e",
+    "wineopenxr_tree": "db3d1b6b1c083acae5d27435886da5b8f7a45576",
+    "xml_sha256": {
+      "vk.xml": "264d0d7350e37d70c82407fb430d085040fc01a9a961d43dec8c2d6ed1dfd183",
+      "video.xml": "d018b914014c06605e367a3b929670511e6f6de2f225c405a8b5e2d912408b76"
+    },
+    "driver_version": 111,
+    "base_sha256": {
+      "files/lib/wine/x86_64-unix/win32u.so": "2585a00d63361196b02eeff2ab153dde983fab51b7916d9cb2e9fc7025a9fe6e",
+      "files/lib/wine/x86_64-unix/winex11.so": "ae7752aa2e29e75686dd79bbf23d6ab567c89bcaa1d75c0511d23119aac094a1",
+      "files/lib/wine/x86_64-windows/winex11.drv": "e9f6b696c49f0b74f12d505b30bd57810043ac13dd56fdc08a5cff31b5d9f49b",
+      "files/lib/wine/x86_64-unix/winewayland.so": "f825765a85e8e9e3bf3e098feffb9e1648510d14f05298738fd50d043bbb9878",
+      "files/lib/wine/x86_64-windows/winewayland.drv": "1ce10c57fd41cc052483963cb14e6ca14a7200f19f4fb282bcdf27afaa236d4b",
+      "files/lib/wine/x86_64-unix/opencl.so": "f7e3e17ccf4c71e44930e8e8c2f1ac07995c01751973a82647392bcac14f8489",
+      "files/lib/wine/x86_64-windows/opencl.dll": "16738426c2c2fb102f39dea2a6d5fe2ce23cdfb6b856c1645fd0408984222ecb",
+      "proton": "873d311b25b9252bf95f7030d24b01b79de643481dc4bb47bbdd137994b95072",
+      "files/lib/wine/x86_64-windows/wined3d.dll": "f3b51d394829a99a0153f0f596ef6af96186c6ccaa5ec195e0b9d021d136101a"
+    }
+  }
+}

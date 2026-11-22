@@ -1,0 +1,86 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+winewayland.drv: Keep the layered alpha multiplier across surface roles.
+
+Initialize the surface alpha multiplier before applying layered window
+attributes and retain the requested multiplier in the window data for
+both SetLayeredWindowAttributes and UpdateLayeredWindow. Reset it when
+WS_EX_LAYERED changes.
+
+Use wayland_surface_sync_alpha to create or destroy the alpha modifier
+from the saved multiplier. This preserves opacity when the surface gains
+a role and allows later attribute updates to recreate a modifier that
+was removed at full opacity.
+
+Applies to: Valve Wine fda79a5 (GE-Proton11-12) after GE's preparation, in order after 0008.
+
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -1477,15 +1477,13 @@
+         ERR("Failed to create wp_viewport Wayland surface\n");
+         goto err;
+     }
++    surface->alpha_multiplier = UINT32_MAX;
+     if (process_wayland.wp_alpha_modifier_v1)
+     {
+         COLORREF key;
+         DWORD flags;
+         BYTE alpha;
+ 
+-        surface->wp_alpha_modifier_surface_v1 =
+-            wp_alpha_modifier_v1_get_surface(process_wayland.wp_alpha_modifier_v1, surface->wl_surface);
+-
+         if (!NtUserGetLayeredWindowAttributes(hwnd, &key, &alpha, &flags)) flags = 0;
+         wayland_surface_set_opacity(surface, alpha, flags);
+     }
+@@ -1493,7 +1491,6 @@
+     surface->window.scale = 1.0;
+     surface->comitted.scale = 0.0;
+     surface->ensured_contents = WAYLAND_SURFACE_NOT_ENSURED;
+-    surface->alpha_multiplier = UINT32_MAX;
+ 
+     return surface;
+ 
+@@ -5589,12 +5586,10 @@
+ 
+ void wayland_surface_set_opacity(struct wayland_surface *surface, BYTE alpha, UINT flags)
+ {
+-    uint32_t opacity;
+-
+-    if (!surface->wp_alpha_modifier_surface_v1) return;
++    if (!process_wayland.wp_alpha_modifier_v1) return;
+ 
+-    opacity = (flags & LWA_ALPHA) ? (UINT32_MAX / 0xff) * alpha : UINT32_MAX;
+-    wp_alpha_modifier_surface_v1_set_multiplier(surface->wp_alpha_modifier_surface_v1, opacity);
++    surface->alpha_multiplier = (flags & LWA_ALPHA) ? (UINT32_MAX / 0xff) * alpha : UINT32_MAX;
++    wayland_surface_sync_alpha(surface);
+     wl_surface_commit(surface->wl_surface);
+     wl_display_flush(process_wayland.wl_display);
+ }
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -1435,6 +1435,7 @@
+ 
+     if (!(data = wayland_win_data_get(hwnd))) return;
+ 
++    data->alpha_multiplier = (flags & LWA_ALPHA) ? (UINT32_MAX / 0xff) * alpha : UINT32_MAX;
+     if ((surface = data->wayland_surface))
+         wayland_surface_set_opacity(surface, alpha, flags);
+     data->layered_attribs_set = TRUE;
+@@ -1499,6 +1500,7 @@
+     /* Changing WS_EX_LAYERED resets attributes */
+     if (offset == GWL_EXSTYLE && (changed & WS_EX_LAYERED))
+     {
++        data->alpha_multiplier = UINT32_MAX;
+         if ((surface = data->wayland_surface))
+             wayland_surface_set_opacity(surface, 0, 0);
+         data->layered_attribs_set = FALSE;
+@@ -1589,6 +1591,7 @@
+ 
+     if (!(data = wayland_win_data_get(hwnd))) return;
+ 
++    data->alpha_multiplier = (flags & LWA_ALPHA) ? (UINT32_MAX / 0xff) * alpha : UINT32_MAX;
+     if ((surface = data->wayland_surface))
+         wayland_surface_set_opacity(surface, alpha, flags);
+ 

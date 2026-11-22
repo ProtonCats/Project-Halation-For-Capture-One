@@ -1,0 +1,57 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+winex11.drv, winewayland.drv: Do not map layered windows below constant alpha 8.
+
+A layered window whose LWA_ALPHA constant alpha is below 8 (about 3%)
+shows nothing a user can see, yet it still takes compositor space and
+pointer input, and a compositor that blurs behind translucent windows
+draws a blurred band through it. Applications use such near-transparent
+windows as resize grips or glow strips around their main window.
+
+Do not map the X11 window while LWA_ALPHA is below 8. On Wayland, treat
+a layered window whose saved alpha multiplier is below 8/255 as invisible
+when selecting its surface role.
+
+Leave the Windows visibility style intact, so raising the alpha later
+maps the window again through the normal window state update.
+
+Applies to: Valve Wine fda79a5 (GE-Proton11-12) after GE's preparation, in order after 0009.
+
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -3838,6 +3838,21 @@
+         new_style &= ~WS_VISIBLE;
+     }
+ 
++    /* a layered window below about 3% constant alpha is not shown: invisible, and a blurring
++     * compositor would draw its background through it */
++    if ((new_style & WS_VISIBLE) && (ex_style & WS_EX_LAYERED) && data->layered)
++    {
++        COLORREF key;
++        DWORD flags;
++        BYTE alpha;
++
++        if (NtUserGetLayeredWindowAttributes( hwnd, &key, &alpha, &flags ) && (flags & LWA_ALPHA) && alpha < 8)
++        {
++            TRACE( "win %p/%lx has constant alpha %u, not mapping\n", hwnd, data->whole_window, alpha );
++            new_style &= ~WS_VISIBLE;
++        }
++    }
++
+     XFlush( gdi_display );  /* make sure painting is done before we move the window */
+ 
+     if (use_force_below_hack())
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -410,6 +410,10 @@
+         (client || wayland_surface_has_hwnd_dmabuf_content(surface)))
+         visible = TRUE;
+ 
++    /* a layered window below about 3% constant alpha is not shown: invisible, and a blurring
++     * compositor would draw its background through it */
++    if ((exstyle & WS_EX_LAYERED) && data->alpha_multiplier < (UINT32_MAX / 0xff) * 8) visible = FALSE;
++
+     if (visible && !owner_surface && !use_layer_shell && !toplevel_surface &&
+         !rect_intersects_virtual_screen(&data->rects.window) &&
+         !should_keep_minimized_toplevel_mapped(surface, style))

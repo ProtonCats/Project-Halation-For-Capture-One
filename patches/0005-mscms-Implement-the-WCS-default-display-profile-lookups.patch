@@ -1,0 +1,178 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+mscms: Implement the WCS default display profile lookups.
+
+WcsGetUsePerUserProfiles, WcsGetDefaultColorProfileSize and
+WcsGetDefaultColorProfile were stubs returning ERROR_CALL_NOT_IMPLEMENTED,
+so a program asking for the monitor's profile always fell back to sRGB.
+
+For a display device named by its DeviceKey (as EnumDisplayDevicesW returns
+it with EDD_GET_DEVICE_INTERFACE_NAME), read the ICMProfile list where
+Windows keeps it: the device's class key for the system-wide scope, and
+HKCU\Software\Microsoft\Windows NT\CurrentVersion\ICM\ProfileAssociations\
+Display\<class>\<index> for the current user, which falls back to the system
+list when it has none. The default is the last entry of the list.
+UsePerUserProfiles comes from the same user key and defaults to FALSE.
+
+Behaviour matched to Windows 10 (19045), shown by repro/p4-colour --wcs:
+the per-user query returns TRUE with FALSE for any device string and fails
+with ERROR_INVALID_PARAMETER for a NULL device or output; with no
+association the size and name calls fail with ERROR_FILE_NOT_FOUND; with
+one, the size is the name's length in bytes with its terminator, the name is
+the profile's file name, a short buffer fails with ERROR_INSUFFICIENT_BUFFER
+and a NULL buffer with ERROR_INVALID_PARAMETER. Which entry Windows treats
+as the default when several are associated was not measured.
+
+diff --git a/dlls/mscms/profile.c b/dlls/mscms/profile.c
+index 395fe50d..002bcb9d 100644
+--- a/dlls/mscms/profile.c
++++ b/dlls/mscms/profile.c
+@@ -1440,11 +1440,76 @@ BOOL WINAPI CloseColorProfile( HPROFILE handle )
+ /******************************************************************************
+  * WcsGetUsePerUserProfiles               [MSCMS.@]
+  */
++static const WCHAR display_class[] = L"{4d36e96e-e325-11ce-bfc1-08002be10318}\\";
++
++/* The display device's class subkey ("{class guid}\\0000") from its DeviceKey, as EnumDisplayDevicesW returns it. */
++static BOOL wcs_display_subkey( const WCHAR *device, WCHAR *subkey, DWORD count )
++{
++    static const WCHAR prefix[] = L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Class\\";
++    const WCHAR *rest;
++
++    if (!device || wcsnicmp( device, prefix, ARRAY_SIZE(prefix) - 1 )) return FALSE;
++    rest = device + ARRAY_SIZE(prefix) - 1;
++    if (wcsnicmp( rest, display_class, ARRAY_SIZE(display_class) - 1 ) || wcslen( rest ) >= count) return FALSE;
++    wcscpy( subkey, rest );
++    return TRUE;
++}
++
++static void wcs_user_path( const WCHAR *subkey, WCHAR *path, DWORD count )
++{
++    swprintf( path, count, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ICM\\ProfileAssociations\\Display\\%s", subkey );
++}
++
++/* The default profile name for a display in a scope: the last entry of its ICMProfile list. The user scope
++ * falls back to the system list when it has none. Returns the name's length, 0 when there is none. */
++static DWORD wcs_default_profile( WCS_PROFILE_MANAGEMENT_SCOPE scope, const WCHAR *device, WCHAR *name, DWORD count )
++{
++    WCHAR subkey[MAX_PATH], path[MAX_PATH * 2], *list = NULL, *entry, *last = NULL;
++    DWORD size = 0, len;
++    HKEY root = HKEY_LOCAL_MACHINE;
++
++    if (!wcs_display_subkey( device, subkey, ARRAY_SIZE(subkey) )) return 0;
++    if (scope == WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER)
++    {
++        wcs_user_path( subkey, path, ARRAY_SIZE(path) );
++        root = HKEY_CURRENT_USER;
++        if (RegGetValueW( root, path, L"ICMProfile", RRF_RT_REG_MULTI_SZ, NULL, NULL, &size )) root = HKEY_LOCAL_MACHINE;
++    }
++    if (root == HKEY_LOCAL_MACHINE)
++    {
++        swprintf( path, ARRAY_SIZE(path), L"System\\CurrentControlSet\\Control\\Class\\%s", subkey );
++        size = 0;
++        if (RegGetValueW( root, path, L"ICMProfile", RRF_RT_REG_MULTI_SZ, NULL, NULL, &size )) return 0;
++    }
++    if (!(list = malloc( size ))) return 0;
++    if (!RegGetValueW( root, path, L"ICMProfile", RRF_RT_REG_MULTI_SZ, NULL, list, &size ))
++        for (entry = list; *entry; entry += wcslen( entry ) + 1) last = entry;
++    len = last ? wcslen( last ) : 0;
++    if (name && len && len < count) wcscpy( name, last );
++    free( list );
++    return len;
++}
++
+ BOOL WINAPI WcsGetUsePerUserProfiles( const WCHAR* name, DWORD class, BOOL* use_per_user_profile )
+ {
+-    FIXME( "%s %s %p\n", debugstr_w(name), debugstr_fourcc(class), use_per_user_profile );
+-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+-    return FALSE;
++    WCHAR subkey[MAX_PATH], path[MAX_PATH * 2];
++    DWORD value, size = sizeof(value);
++
++    TRACE( "%s %s %p\n", debugstr_w(name), debugstr_fourcc(class), use_per_user_profile );
++
++    if (!name || !use_per_user_profile)
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return FALSE;
++    }
++    *use_per_user_profile = FALSE;
++    if (class == CLASS_MONITOR && wcs_display_subkey( name, subkey, ARRAY_SIZE(subkey) ))
++    {
++        wcs_user_path( subkey, path, ARRAY_SIZE(path) );
++        if (!RegGetValueW( HKEY_CURRENT_USER, path, L"UsePerUserProfiles", RRF_RT_REG_DWORD, NULL, &value, &size ))
++            *use_per_user_profile = !!value;
++    }
++    return TRUE;
+ }
+ 
+ /******************************************************************************
+@@ -1464,9 +1529,32 @@ BOOL WINAPI WcsGetDefaultColorProfile( WCS_PROFILE_MANAGEMENT_SCOPE scope, PCWST
+                                        COLORPROFILETYPE type, COLORPROFILESUBTYPE subtype,
+                                        DWORD profile_id, DWORD size, LPWSTR name )
+ {
+-    FIXME( "%d, %s, %d, %d, %lu, %lu, %p\n", scope, debugstr_w(device_name), type, subtype, profile_id, size, name );
+-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+-    return FALSE;
++    DWORD len;
++
++    TRACE( "%d, %s, %d, %d, %lu, %lu, %p\n", scope, debugstr_w(device_name), type, subtype, profile_id, size, name );
++
++    if (!device_name || !name)
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return FALSE;
++    }
++    if (type != CPT_ICC)
++    {
++        FIXME( "profile type %d not supported\n", type );
++        SetLastError( ERROR_NOT_SUPPORTED );
++        return FALSE;
++    }
++    if (!(len = wcs_default_profile( scope, device_name, name, size / sizeof(WCHAR) )))
++    {
++        SetLastError( ERROR_FILE_NOT_FOUND );
++        return FALSE;
++    }
++    if (size < (len + 1) * sizeof(WCHAR))
++    {
++        SetLastError( ERROR_INSUFFICIENT_BUFFER );
++        return FALSE;
++    }
++    return TRUE;
+ }
+ 
+ /******************************************************************************
+@@ -1476,9 +1564,28 @@ BOOL WINAPI WcsGetDefaultColorProfileSize( WCS_PROFILE_MANAGEMENT_SCOPE scope, P
+                                            COLORPROFILETYPE type, COLORPROFILESUBTYPE subtype,
+                                            DWORD profile_id, PDWORD profile_size)
+ {
+-    FIXME( "%d, %s, %d, %d, %lu, %p\n", scope, debugstr_w(device_name), type, subtype, profile_id, profile_size );
+-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+-    return FALSE;
++    DWORD len;
++
++    TRACE( "%d, %s, %d, %d, %lu, %p\n", scope, debugstr_w(device_name), type, subtype, profile_id, profile_size );
++
++    if (!device_name || !profile_size)
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return FALSE;
++    }
++    if (type != CPT_ICC)
++    {
++        FIXME( "profile type %d not supported\n", type );
++        SetLastError( ERROR_NOT_SUPPORTED );
++        return FALSE;
++    }
++    if (!(len = wcs_default_profile( scope, device_name, NULL, 0 )))
++    {
++        SetLastError( ERROR_FILE_NOT_FOUND );
++        return FALSE;
++    }
++    *profile_size = (len + 1) * sizeof(WCHAR);
++    return TRUE;
+ }
+ 
+ /******************************************************************************

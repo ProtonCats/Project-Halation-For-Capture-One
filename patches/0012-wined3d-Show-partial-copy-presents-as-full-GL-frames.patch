@@ -1,0 +1,71 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+wined3d: Show unscaled partial copy presents as full GL frames.
+
+A windowed swapchain with the copy swap effect that presents a rectangle
+smaller than its client area takes swapchain_blit_gdi() whenever the GL
+pixel format's swap method is not WGL_SWAP_COPY_ARB. win32u reports
+WGL_SWAP_UNDEFINED_ARB for every EGL format, so on the EGL drivers every
+such present goes through GDI. Under the Wayland driver the GDI blit
+lands in the window's shared-memory surface, which is cleared to black
+outside the painted region, while the GL client surface stays below it:
+a WPF window drawn through Direct3D 9 shows black except the region that
+last changed. Seen with repro/p1d-wpf-input --autotype under
+PROTON_ENABLE_WAYLAND=1 and Wine's own Direct3D for WPF; the GDI path
+announces itself once with "fixme:d3d:swapchain_blit_gdi Using GDI present."
+
+With the copy swap effect the back buffer still holds the whole frame,
+so when it matches the client area and the present is not scaled, swap
+all of it on GL instead. Scaled presents and size mismatches keep the
+GDI path.
+
+Applies to: Valve Wine fda79a5 after GE-Proton11-12's preparation. Wine
+master as of 2026-11 has the same condition in swapchain_gl_present().
+
+--- a/dlls/wined3d/swapchain.c
++++ b/dlls/wined3d/swapchain.c
+@@ -1348,6 +1348,24 @@
+     return false;
+ }
+ 
++/* Full-frame rects for a windowed present whose back buffer matches the client area and is not scaled. */
++static bool swapchain_present_full_rects(struct wined3d_swapchain *swapchain, const RECT *src_rect,
++        const RECT *dst_rect, RECT *full_src, RECT *full_dst)
++{
++    const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
++    RECT client_rect;
++
++    if (!desc->windowed || !GetClientRect(swapchain->win_handle, &client_rect))
++        return false;
++    if (client_rect.right != desc->backbuffer_width || client_rect.bottom != desc->backbuffer_height)
++        return false;
++    if (!EqualRect(src_rect, dst_rect))
++        return false;
++    SetRect(full_src, 0, 0, desc->backbuffer_width, desc->backbuffer_height);
++    *full_dst = *full_src;
++    return true;
++}
++
+ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
+         const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags)
+ {
+@@ -1379,7 +1397,18 @@
+     }
+     else
+     {
++        RECT full_src, full_dst;
++
+         pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format];
++        /* A copy back buffer holds the whole frame, so a partial unscaled present can swap all of it on GL. */
++        if (pixel_format->swap_method != WGL_SWAP_COPY_ARB && swapchain_present_is_partial_copy(swapchain, dst_rect)
++                && swapchain_present_full_rects(swapchain, src_rect, dst_rect, &full_src, &full_dst))
++        {
++            TRACE("Partial copy present %s shown as the full frame %s.\n",
++                    wine_dbgstr_rect(dst_rect), wine_dbgstr_rect(&full_dst));
++            src_rect = &full_src;
++            dst_rect = &full_dst;
++        }
+         if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
+                 || (pixel_format->swap_method != WGL_SWAP_COPY_ARB
+                 && swapchain_present_is_partial_copy(swapchain, dst_rect)))

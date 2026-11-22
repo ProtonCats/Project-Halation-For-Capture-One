@@ -1,0 +1,23 @@
+{
+  "install_dir": "drive_c/Program Files/Capture One",
+  "program": "Capture One/CaptureOne.exe",
+  "installer_args": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/LOG=C:\\halation-install.log"],
+  "prerequisites": [],
+  "windows_version": "win10",
+  "dll_overrides": {"wintab32": "disabled"},
+  "registry": [
+    {
+      "key": "HKCU\\Software\\Microsoft\\Avalon.Graphics",
+      "name": "DisableHWAcceleration",
+      "type": "REG_DWORD",
+      "data": 1
+    },
+    {
+      "key": "HKCU\\Software\\Wine\\AppDefaults\\msedgewebview2.exe",
+      "name": "Version",
+      "type": "REG_SZ",
+      "data": "win8"
+    }
+  ],
+  "environment": {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": "--disable-gpu"}
+}

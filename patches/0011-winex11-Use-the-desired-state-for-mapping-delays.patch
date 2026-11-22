@@ -1,0 +1,43 @@
+SPDX-FileCopyrightText: 2026 Rémi Bernon (upstream Wine)
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+winex11.drv: Use the desired state for mapping delays.
+
+Backport of upstream Wine commit 2b05f63811f0e1acfd13e0f61d1a668b32a6de9a
+(Rémi Bernon, 2026-06-30; Wine-Bug 59932), which the GE-Proton11-12 base
+does not include. Upstream message:
+
+  This matches the state the host window is supposed to be in, whereas
+  pending_state is the state we have requested yet but which may need
+  further requests.
+
+Symptom it fixes here: a captioned window shown and hidden in one burst,
+then given a second SetWindowPos(SWP_HIDEWINDOW) before the window
+manager has answered the map, stays mapped while Windows reports it
+hidden, as a blank window on screen. Shown by repro/p9-show-hide.
+
+Adapted to the GE tree, whose layered-window check also tests
+WS_EX_COMPOSITED. Drop this patch once the pinned base includes the
+upstream commit.
+Applies to: Valve Wine fda79a5 (GE-Proton11-12) after GE's preparation, in order after 0010.
+
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -3823,7 +3823,7 @@
+            debugstr_window_rects(new_rects), new_style, swp_flags );
+ 
+     /* visible windows are only hidden after SWP_HIDEWINDOW is used */
+-    if (data->pending_state.wm_state != WithdrawnState && !(new_style & WS_VISIBLE) &&
++    if (data->desired_state.wm_state != WithdrawnState && !(new_style & WS_VISIBLE) &&
+         !(swp_flags & SWP_HIDEWINDOW))
+     {
+         WARN( "win %p/%lx not yet hidden, delaying unmapping\n", hwnd, data->whole_window );
+@@ -3831,7 +3831,7 @@
+     }
+ 
+     /* layered windows are mapped only once their attributes are set */
+-    if (data->pending_state.wm_state == WithdrawnState && (new_style & WS_VISIBLE) &&
++    if (data->desired_state.wm_state == WithdrawnState && (new_style & WS_VISIBLE) &&
+         (ex_style & (WS_EX_LAYERED | WS_EX_COMPOSITED)) == WS_EX_LAYERED && !data->layered && !IsRectEmpty( &new_rects->window ))
+     {
+         WARN( "win %p/%lx is layered, delaying mapping\n", hwnd, data->whole_window );

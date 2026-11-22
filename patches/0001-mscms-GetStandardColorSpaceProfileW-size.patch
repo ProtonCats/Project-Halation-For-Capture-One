@@ -1,0 +1,57 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+mscms: Return the needed size from GetStandardColorSpaceProfileW.
+
+With no buffer, or a buffer that is too small, Windows fails with
+ERROR_INSUFFICIENT_BUFFER and writes the needed size in bytes, the
+terminating NUL included; on success it writes that size back too. An
+unknown profile id fails with ERROR_FILE_NOT_FOUND before the buffer is
+looked at, leaving the size untouched.
+
+Wine returned before writing any size when the buffer was NULL, counted
+no room for the NUL (so a buffer exactly the length of the path was
+overrun by one WCHAR, and the call reported success), and used
+ERROR_MORE_DATA for a short buffer.
+
+Shown by repro/p4-colour on Windows 10 (19045) and on Wine 11.0 and 11.21.
+Applies to: Valve Wine fda79a5 (GE-Proton11-12) and Wine master as of 2026-11.
+
+diff --git a/dlls/mscms/profile.c b/dlls/mscms/profile.c
+index 395fe50d..c76da1d9 100644
+--- a/dlls/mscms/profile.c
++++ b/dlls/mscms/profile.c
+@@ -570,12 +570,6 @@ BOOL WINAPI GetStandardColorSpaceProfileW( PCWSTR machine, DWORD id, PWSTR profi
+         return FALSE;
+     }
+ 
+-    if (!profile)
+-    {
+-        SetLastError( ERROR_INSUFFICIENT_BUFFER );
+-        return FALSE;
+-    }
+-
+     GetColorDirectoryW( machine, rgbprofile, &len );
+ 
+     switch (id)
+@@ -583,16 +577,17 @@ BOOL WINAPI GetStandardColorSpaceProfileW( PCWSTR machine, DWORD id, PWSTR profi
+         case LCS_sRGB:
+         case LCS_WINDOWS_COLOR_SPACE: /* FIXME */
+             lstrcatW( rgbprofile, L"\\srgb color space profile.icm" );
+-            len = lstrlenW( rgbprofile ) * sizeof(WCHAR);
++            len = (lstrlenW( rgbprofile ) + 1) * sizeof(WCHAR);
+ 
+-            if (*size < len)
++            if (!profile || *size < len)
+             {
+                 *size = len;
+-                SetLastError( ERROR_MORE_DATA );
++                SetLastError( ERROR_INSUFFICIENT_BUFFER );
+                 return FALSE;
+             }
+ 
+             lstrcpyW( profile, rgbprofile );
++            *size = len;
+             break;
+ 
+         default:

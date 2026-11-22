@@ -1,0 +1,8 @@
+<!-- SPDX-FileCopyrightText: 2026 ProtonCats and contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+</Project>

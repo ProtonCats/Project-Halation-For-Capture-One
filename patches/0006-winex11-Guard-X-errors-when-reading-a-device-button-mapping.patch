@@ -1,0 +1,90 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+winex11.drv: Guard X errors when reading a pointer device's button mapping.
+
+On a raw button event from a new source device, or a slave switch,
+update_device_mapping() opens the device and reads its button mapping
+with no expected-error guard. When the device is already gone, or does
+not support the request (XWayland's synthetic devices), the server
+answers XI_BadDevice or BadMatch; Wine's error handler passes the
+unexpected error to Xlib's default handler, which ends the process.
+Seen as "X Error of failed request: XI_BadDevice ... X_GetDeviceButtonMapping"
+followed by exit code 1 in the middle of a file import under XWayland.
+
+Guard XOpenDevice, XGetDeviceButtonMapping and XCloseDevice the way
+wintab.c already guards the same calls, and keep the previous mapping
+when the new one cannot be read.
+
+Related reports: ValveSoftware/Proton#5744, Wine bugs 57808 and 58686.
+Applies to: Valve Wine fda79a5 (GE-Proton11-12) and Wine master as of 2026-11.
+
+--- a/dlls/winex11.drv/mouse.c
++++ b/dlls/winex11.drv/mouse.c
+@@ -264,12 +264,34 @@
+     free( InterlockedExchangePointer( (void**)&pointer_mapping, tmp ) );
+ }
+ 
++static int device_mapping_error( Display *display, XErrorEvent *event, void *arg )
++{
++    return 1;
++}
++
++static void close_device( Display *display, XDevice *device )
++{
++    X11DRV_expect_error( display, device_mapping_error, NULL );
++    pXCloseDevice( display, device );
++    XSync( display, False );
++    X11DRV_check_error();
++}
++
+ static void update_device_mapping( Display *display, int deviceid )
+ {
+     struct mouse_button_mapping *tmp;
+-    XDevice *device;
++    XDevice *device = NULL;
++    int count;
+ 
+-    if (!deviceid || !(device = pXOpenDevice( display, deviceid )))
++    /* The source device may already be gone, or not support the request (XWayland's
++     * gesture devices); an unexpected X error would otherwise end the process. */
++    if (deviceid)
++    {
++        X11DRV_expect_error( display, device_mapping_error, NULL );
++        device = pXOpenDevice( display, deviceid );
++        if (X11DRV_check_error()) device = NULL;
++    }
++    if (!device)
+     {
+         WARN( "Unable to open cursor device %d\n", deviceid );
+         return;
+@@ -278,17 +300,25 @@
+     if (!(tmp = malloc( sizeof(*tmp) )))
+     {
+         WARN( "Unable to allocate device mapping.\n" );
+-        pXCloseDevice( display, device );
++        close_device( display, device );
+         return;
+     }
+ 
+     tmp->deviceid = deviceid;
+-    tmp->button_count = ARRAY_SIZE( tmp->buttons );
+-    tmp->button_count = pXGetDeviceButtonMapping( display, device, tmp->buttons, tmp->button_count );
++    X11DRV_expect_error( display, device_mapping_error, NULL );
++    count = pXGetDeviceButtonMapping( display, device, tmp->buttons, ARRAY_SIZE( tmp->buttons ) );
++    if (X11DRV_check_error() || count <= 0)
++    {
++        WARN( "Unable to get the button mapping of cursor device %d\n", deviceid );
++        free( tmp );
++        close_device( display, device );
++        return;
++    }
++    tmp->button_count = count;
+ 
+     free( InterlockedExchangePointer( (void**)&device_mapping, tmp ) );
+ 
+-    pXCloseDevice( display, device );
++    close_device( display, device );
+ }
+ 
+ void X11DRV_InitMouse( Display *display )

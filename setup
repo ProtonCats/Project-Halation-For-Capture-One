@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+# SPDX-License-Identifier: MIT
+from core.entry import setup_main
+
+if __name__ == "__main__":
+    raise SystemExit(setup_main())

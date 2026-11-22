@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+# SPDX-License-Identifier: MIT
+# Install a pre-push hook that runs the leak check, so a plain git push runs it too.
+# The hook refuses when the check is missing (a checkout without tools/prepush.py), never skips.
+set -eu
+hooks=$(git rev-parse --path-format=absolute --git-path hooks)
+mkdir -p "$hooks"
+rm -f "$hooks/pre-push"  # an older install was a symlink into tools/; never write through it
+cat > "$hooks/pre-push" <<'EOF'
+#!/bin/sh
+check="$(git rev-parse --show-toplevel)/tools/prepush.py"
+if [ ! -f "$check" ]; then
+    echo "pre-push: $check is missing; refusing the push" >&2
+    exit 2
+fi
+exec python3 "$check" "$@"
+EOF
+chmod +x "$hooks/pre-push"
+echo "pre-push hook installed in $hooks"
