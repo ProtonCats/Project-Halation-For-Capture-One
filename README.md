@@ -3,7 +3,7 @@
 
 # Run Capture One on Linux
 
-**[Quick start](#quick-start)** · **[How it works](#how-it-works)** · **[Ground rules](#ground-rules)** · **[Status](#status)** · **[Contributing](#contributing)** · **[Reference](docs/reference.md)**
+**[Install](#install-step-by-step)** · **[How it works](#how-it-works)** · **[Ground rules](#ground-rules)** · **[Status](#status)** · **[Contributing](#contributing)** · **[Reference](docs/reference.md)**
 
 Halation runs the Windows edition of Capture One on a Linux desktop, through Proton and Wine. You bring the installer you downloaded; `setup` builds a pinned GE-Proton runner with a small set of Wine fixes, creates a Windows prefix and installs the app into it, and `run` starts it.
 
@@ -26,8 +26,6 @@ prefix: complete (164.6s)
 $ ./run
 ```
 
-*A fresh clone on the maintainer's PC: 335 s from clone to an installed app.*
-
 **Early, unreleased, provided as is.** It has been tested on one machine so far, and reports from other distributions and GPUs are the most useful help right now.
 
 > [!NOTE]
@@ -35,7 +33,7 @@ $ ./run
 
 ## Contents
 
-- [Quick start](#quick-start)
+- [Install, step by step](#install-step-by-step)
 - [How it works](#how-it-works)
 - [Ground rules](#ground-rules)
 - [Wine patches](#wine-patches)
@@ -45,16 +43,9 @@ $ ./run
 - [Layout](#layout)
 - [Legal](#legal)
 
-## Quick start
+## Install, step by step
 
-**You need:**
-
-- x86-64 Linux with a Vulkan driver (developed on NVIDIA);
-- [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) (`umu-run`) and Python 3;
-- the build tools for the Wine fixes: git, curl, autoconf, autoheader, perl, bison, flex, make, gcc, clang, lld and llvm-ar, plus the development packages listed in the [reference](docs/reference.md#building-the-runner);
-- the Capture One installer for Windows, downloaded from the official site.
-
-**Then:**
+**In short**, for anyone used to building from source:
 
 ```sh
 git clone <repository-url> halation
@@ -63,9 +54,110 @@ cd halation
 ./run
 ```
 
-Setup keeps everything in `$XDG_DATA_HOME/halation-layer` (`--data <dir>` picks another place). It skips steps it has already verified, so running it again is safe. Arguments after `./run --` go to the app.
+The steps below say the same thing with every command spelled out.
 
-![Setup, step by step, drawn as a darkroom test strip: fetch 38.5 s (upstream runner), build 59 s, assemble 0.3 s, build-unix 68.9 s and assemble-unix 0.4 s (Halation's Wine fixes), prefix 164.6 s (your installer, in a new prefix); 335 s in all on one fresh clone.](docs/setup.svg)
+### 1. Check your computer
+
+- **Linux on a 64-bit PC** (x86-64) with a graphics driver that supports Vulkan. Halation has been tested with an NVIDIA card; AMD and Intel are untested.
+- **About 10 GB of free space** in your home folder, for the runner, its build files and the Windows prefix with Capture One in it.
+- **The Capture One installer for Windows** (the `.exe` file), downloaded from the official Capture One website, and your Capture One account.
+
+### 2. Install the tools Halation builds with
+
+Open a terminal and run the command for your distribution. Only Fedora-based systems have been tested so far.
+
+**Fedora and Nobara:**
+
+```sh
+sudo dnf install git-core curl autoconf perl-interpreter bison flex make gcc clang lld llvm binutils patch \
+  pkgconf-pkg-config python3 libX11-devel libXi-devel libXext-devel libXrandr-devel libXrender-devel \
+  libXfixes-devel libXcursor-devel libXcomposite-devel libXinerama-devel vulkan-loader-devel wayland-devel \
+  libxkbcommon-devel ocl-icd-devel glibc-devel
+```
+
+Nobara already includes `umu-launcher`. On Fedora, install the `.rpm` for your release from the [umu-launcher releases](https://github.com/Open-Wine-Components/umu-launcher/releases).
+
+**Debian 13 and Ubuntu 24.04 (untested):**
+
+```sh
+sudo apt install git curl autoconf perl bison flex make gcc clang lld llvm binutils patch pkg-config python3 \
+  libx11-dev libxi-dev libxext-dev libxrandr-dev libxrender-dev libxfixes-dev libxcursor-dev libxcomposite-dev \
+  libxinerama-dev libvulkan-dev libwayland-dev libxkbcommon-dev libxkbregistry-dev ocl-icd-opencl-dev libc6-dev
+```
+
+Then install `umu-launcher` from the `.deb` packages on its [releases page](https://github.com/Open-Wine-Components/umu-launcher/releases).
+
+**Arch (untested):**
+
+```sh
+sudo pacman -S --needed git curl autoconf perl bison flex make gcc clang lld llvm binutils patch pkgconf python \
+  umu-launcher libx11 libxi libxext libxrandr libxrender libxfixes libxcursor libxcomposite libxinerama \
+  vulkan-icd-loader vulkan-headers wayland libxkbcommon ocl-icd opencl-headers
+```
+
+For GPU image processing, your graphics driver's OpenCL support must be installed too; it is often a separate package. Without it, Capture One processes images on the CPU.
+
+### 3. Download Halation
+
+```sh
+git clone <repository-url> halation
+cd halation
+```
+
+### 4. Run setup
+
+Give setup the path to the installer you downloaded, for example:
+
+```sh
+./setup ~/Downloads/<the Capture One installer>.exe
+```
+
+Setup takes about six minutes and prints one line per step, ending with `prefix: complete`. It runs the Capture One installer silently, so no installer window appears. Running setup again is safe: finished steps are checked and skipped.
+
+![Setup, step by step, drawn as a darkroom test strip: fetch 38.5 s (upstream runner), build 59 s, assemble 0.3 s, build-unix 68.9 s and assemble-unix 0.4 s (Halation's Wine fixes), prefix 164.6 s (your installer, in a new prefix); 335 s in all.](docs/setup.svg)
+
+### 5. Start Capture One
+
+```sh
+./run
+```
+
+Sign in as you would on Windows. In the app's file dialogs your Linux files are on drive `Z:`, so your home folder is `Z:\home\<your user name>`.
+
+### 6. Optional: add it to your app menu
+
+Save this as `~/.local/share/applications/halation.desktop`, with the real path to your `halation` folder:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Capture One (Halation)
+Exec=/home/<your user name>/halation/run
+Icon=camera-photo
+Categories=Graphics;Photography;
+```
+
+### Updating
+
+```sh
+cd halation
+git pull
+./setup ~/Downloads/<the Capture One installer>.exe
+```
+
+Setup checks every finished step. If an update changed one, setup stops and names the folder to remove; remove it and run setup again. If that folder is the prefix (`pfx`), first copy out any catalogs or sessions you saved inside it.
+
+### Removing
+
+Everything Halation made is in `~/.local/share/halation-layer`, plus the `halation` folder you cloned; delete both to remove it. Catalogs and sessions you saved inside the prefix (under `pfx/drive_c/users/steamuser`) go with it, so copy them out first.
+
+### If something goes wrong
+
+- **`missing required tools: ...`**: install the tools it names (step 2), then run setup again.
+- **`... remove <folder> before retrying`**: delete that folder, then run setup again.
+- **`a local installer file is required`**: the path after `./setup` must point to the installer `.exe`.
+- **"Open With plugin could not be enabled"** in Capture One: that plugin needs Microsoft's .NET Framework 4.8; see the [reference](docs/reference.md#optional-the-plugin-runtime).
+- **Anything else**: open an issue with the output of `./setup`; see [Contributing](#contributing).
 
 ## How it works
 
