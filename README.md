@@ -63,6 +63,8 @@ cd halation
 
 Setup keeps everything in `$XDG_DATA_HOME/halation-layer` (`--data <dir>` picks another place). It skips steps it has already verified, so running it again is safe. Arguments after `./run --` go to the app.
 
+![Setup, step by step, drawn as a darkroom test strip: fetch 38.5 s (upstream runner), build 59 s, assemble 0.3 s, build-unix 68.9 s and assemble-unix 0.4 s (Halation's Wine fixes), prefix 164.6 s (your installer, in a new prefix); 335 s in all on one fresh clone.](docs/setup.svg)
+
 ## How it works
 
 ![The layer stack, drawn as a cross-section of colour film. From top: 1, Capture One, your licensed copy, never modified; 2, the Windows prefix, built by setup from the profile; 3, GE-Proton 11-12, upstream and pinned; 4, Halation's 11 Wine fixes as the anti-halation layer; 5, your Linux desktop as the base.](docs/layers.svg)
@@ -75,6 +77,8 @@ The [reference](docs/reference.md) covers each step in detail: the runner build,
 
 ## Ground rules
 
+![Where the fixes live. Changed by Halation: the Wine runner, the Windows prefix and the launch environment. Never touched: the Capture One install, hashed before and after every step; sign-in and activation; your licence.](docs/boundary.svg)
+
 | | Rule | What it means | Enforced by |
 |---|---|---|---|
 | 1 | **The install folder is never modified** | Fixes live in the runner, the prefix or the launch environment, never in the app's files. | A hash of the install tree before and after every setup step and launch (`core/treehash.py`); a change fails the run. |
@@ -84,6 +88,8 @@ The [reference](docs/reference.md) covers each step in detail: the runner build,
 | 5 | **Nothing private leaves** | Logs, traces and machine details stay on the machine that made them. | Every push runs a leak check over each commit, message, path and ref (`tools/prepush.py`). |
 
 ## Wine patches
+
+![Contact sheet of the eleven Wine patches, one frame each with its component and the repro program that shows it; a twelfth open frame invites your fix. The table below lists the same patches as text.](docs/patches.svg)
 
 | Patch | What it fixes | Shown by |
 |---|---|---|
@@ -103,7 +109,9 @@ Patches are LGPL-2.1-or-later, as Wine is, and are written to go upstream to Win
 
 ## Status
 
-**Early, unreleased, provided as is.** Tested on one machine: Nobara 44, an NVIDIA RTX 3090, Hyprland (X11 through XWayland), Capture One 16.9 and GE-Proton 11-12. Other setups are untested.
+**Early, unreleased, provided as is.** Tested on one machine; other setups are untested.
+
+![Tested on: Nobara 44, an NVIDIA RTX 3090, Hyprland through XWayland, Capture One 16.9 and GE-Proton 11-12. Provided as is.](docs/tested.svg)
 
 **Known issues:**
 
