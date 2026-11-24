@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 from core import setup as st
 
+from test_peversion import pe
+
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -44,6 +46,7 @@ class Setup(unittest.TestCase):
         self.registry = {("HKCU\\Software\\Wine\\Direct3D", "OldValue"): "old"}
         self.types = {}
         self.tamper, self.fail_step = None, False
+        self.install_files = {}
         self.enterContext(patch.object(st.px.shutil, "which", return_value="available"))
         self.enterContext(patch.object(st.px.subprocess, "run", side_effect=self.process))
         opener = SimpleNamespace(open=self.download)
@@ -99,6 +102,9 @@ class Setup(unittest.TestCase):
                 if stage == "installer":
                     self.install.mkdir(parents=True, exist_ok=True)
                     (self.install / "program.dll").write_bytes(b"installed")
+                    for relative, data in self.install_files.items():
+                        (self.install / relative).parent.mkdir(parents=True, exist_ok=True)
+                        (self.install / relative).write_bytes(data)
                     self.registry["installer_path"] = str(path)
                     self.registry["at_install"] = list(self.events)
         self.events.append(stage)
@@ -310,6 +316,100 @@ class Setup(unittest.TestCase):
                 self.write_profile()
                 self.assert_pristine_refusal("inside the prefix|forbidden|unknown profile fields")
                 self.profile = original
+
+    def versioned(self):
+        """Apply the profile with a program whose version is 1.0.0.0."""
+        self.profile["program"] = "bin/app.exe"
+        self.write_profile()
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.put_program((1, 0, 0, 0))
+        record = json.loads(self.marker.read_text())
+        st.write_marker(self.prefix, {**record, "install_tree": st.snapshot(self.install), "program": "bin/app.exe",
+                                      "program_version": "1.0.0.0"})
+
+    def put_program(self, version, extra=b""):
+        path = self.install / "bin/app.exe"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(pe(version, extra=extra))
+
+    @property
+    def marker(self):
+        return self.prefix / st.MARKER
+
+    def test_the_marker_records_the_program_version(self):
+        self.profile["program"] = "bin/app.exe"
+        self.write_profile()
+        self.install_files = {"bin/app.exe": pe((16, 9, 0, 3894))}
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        record = json.loads(self.marker.read_text())
+        self.assertEqual((record["program"], record["program_version"]), ("bin/app.exe", "16.9.0.3894"))
+
+    def test_an_app_update_is_recognised_and_recorded(self):
+        self.versioned()
+        self.put_program((2, 0, 0, 7))
+        (self.install / "added.dll").write_bytes(b"new")
+        self.events = []
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.7 (2 files changed)", self.output.getvalue())
+        record = json.loads(self.marker.read_text())
+        self.assertEqual(record["program_version"], "2.0.0.7")
+        self.assertTrue(st.unchanged(self.install, record["install_tree"]))
+        self.assertEqual(self.events, [])
+        self.output.truncate(0)
+        self.assertEqual(self.apply(), 0)
+        self.assertNotIn("updated itself", self.output.getvalue())
+
+    def test_a_changed_folder_with_the_same_version_is_refused(self):
+        self.versioned()
+        before = self.marker.read_bytes()
+        for change in ("other file", "program bytes", "program gone", "program unreadable"):
+            with self.subTest(change=change):
+                path = self.install / ("bin/app.exe" if change.startswith("program") else "extra.dll")
+                saved = path.read_bytes() if path.exists() else None
+                if change == "program gone":
+                    path.unlink()
+                elif change == "program unreadable":
+                    path.write_bytes(b"not a program")
+                elif change == "program bytes":
+                    self.put_program((1, 0, 0, 0), extra=b"patched")
+                else:
+                    path.write_bytes(b"changed")
+                with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
+                    self.apply()
+                self.assertEqual(self.marker.read_bytes(), before)
+                path.unlink(missing_ok=True) if saved is None else path.write_bytes(saved)
+
+    def test_a_marker_without_a_version_needs_a_changed_program(self):
+        self.versioned()
+        record = json.loads(self.marker.read_text())
+        for field in ("program", "program_version"):
+            record.pop(field)
+        st.write_marker(self.prefix, record)
+        (self.install / "extra.dll").write_bytes(b"changed")
+        with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
+            self.apply()
+        self.put_program((3, 1, 0, 0))
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertIn("the app updated itself: an earlier version to 3.1.0.0", self.output.getvalue())
+
+    def test_a_failed_marker_write_keeps_the_old_marker(self):
+        self.versioned()
+        before = self.marker.read_bytes()
+        self.put_program((2, 0, 0, 0))
+        with patch.object(st.os, "replace", side_effect=OSError("injected")), self.assertRaises((OSError, SystemExit)):
+            self.apply()
+        self.assertEqual(self.marker.read_bytes(), before)
+        self.assertEqual([p.name for p in self.prefix.iterdir() if p.name.startswith(".setup-")], [])
+
+    def test_a_program_behind_a_link_is_never_an_update(self):
+        self.versioned()
+        path = self.install / "bin/app.exe"
+        other = self.root / "other.exe"
+        other.write_bytes(pe((9, 0, 0, 0)))
+        path.unlink()
+        path.symlink_to(other)
+        with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
+            self.apply()
 
     def test_forward_only_rule_applies_before_downloads(self):
         self.prefix.mkdir()

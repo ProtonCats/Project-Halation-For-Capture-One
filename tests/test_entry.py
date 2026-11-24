@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from core import entry as en
+from test_peversion import pe
 
 
 class Entry(unittest.TestCase):
@@ -79,7 +80,7 @@ class Entry(unittest.TestCase):
             install = pfx / "drive_c/Program Files/Example"
             self.put(install / "bin/app.exe", b"program")
             self.put(pfx / en.profiles.MARKER, json.dumps({"profile_sha256": en.runner.sha256(self.profile),
-                     "install_tree": en.profiles.snapshot(install)}).encode())
+                     "install_dir": "drive_c/Program Files/Example", "install_tree": en.profiles.snapshot(install)}).encode())
         return 0
 
     def setup(self):
@@ -182,6 +183,22 @@ class Entry(unittest.TestCase):
         (self.data / "pfx" / en.profiles.MARKER).unlink()
         self.assertEqual(self.setup(), 2)
         self.assertIn(f"remove {self.data / 'pfx'}", self.stderr.getvalue())
+
+    def test_an_app_update_does_not_ask_to_remove_the_prefix(self):
+        self.assertEqual(self.setup(), 0)
+        program = self.data / "pfx/drive_c/Program Files/Example/bin/app.exe"
+        marker = self.data / "pfx" / en.profiles.MARKER
+        program.write_bytes(pe((1, 0, 0, 0)))
+        marker.write_text(json.dumps({**json.loads(marker.read_text()), "program": "bin/app.exe", "program_version": "1.0.0.0",
+                                      "install_tree": en.profiles.snapshot(program.parents[1])}))
+        self.forbid_work = True
+        program.write_bytes(pe((2, 0, 0, 0)))
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0 (1 files changed)", self.stdout.getvalue())
+        self.assertNotIn("remove", self.stderr.getvalue())
+        program.write_bytes(pe((2, 0, 0, 0), extra=b"patched"))
+        self.assertEqual(self.setup(), 2)
+        self.assertNotIn("remove", self.stderr.getvalue())
 
     def test_preflight_refuses_missing_tools_before_work(self):
         self.forbid_work = True

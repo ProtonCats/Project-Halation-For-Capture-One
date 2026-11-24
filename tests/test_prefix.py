@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from core import treehash
+from test_peversion import pe
 
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("prefix", REPO / "core/prefix.py")
@@ -384,6 +385,44 @@ class Prefix(unittest.TestCase):
                     px.run(self.args)
                 self.assertEqual(exc.exception.code, 3)
                 self.assertIn("changed program.dll sha256", self.stderr.getvalue())
+
+    def test_an_update_during_the_run_is_reported_and_keeps_the_exit_code(self):
+        install = self.watched_profile()
+        profile = Path(self.args.profile)
+        profile.write_text(json.dumps({**json.loads(profile.read_text()), "program": "app.exe"}))
+        for after, code in (((2, 0, 0, 0), 7), ((1, 0, 0, 0), None)):
+            with self.subTest(after=after):
+                (install / "app.exe").write_bytes(pe((1, 0, 0, 0)))
+                self.stderr.truncate(0)
+                def program(cmd, **kwargs):
+                    if cmd[0] != "umu-run":
+                        return self.hash_command(cmd)
+                    (install / "app.exe").write_bytes(pe(after, extra=b"x"))
+                    return subprocess.CompletedProcess(cmd, 7)
+                self.command.side_effect = program
+                if code is None:
+                    with self.assertRaises(SystemExit) as exc:
+                        px.run(self.args)
+                    self.assertEqual(exc.exception.code, 3)
+                else:
+                    self.assertEqual(px.run(self.args), code)
+                    self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0", self.stderr.getvalue())
+
+    def test_an_explicit_watch_never_accepts_an_update(self):
+        install = self.watched_profile()
+        profile = Path(self.args.profile)
+        profile.write_text(json.dumps({**json.loads(profile.read_text()), "program": "app.exe"}))
+        (install / "app.exe").write_bytes(pe((1, 0, 0, 0)))
+        self.args.watch = str(install)
+        def program(cmd, **kwargs):
+            if cmd[0] != "umu-run":
+                return self.hash_command(cmd)
+            (install / "app.exe").write_bytes(pe((2, 0, 0, 0)))
+            return subprocess.CompletedProcess(cmd, 0)
+        self.command.side_effect = program
+        with self.assertRaises(SystemExit) as exc:
+            px.run(self.args)
+        self.assertEqual(exc.exception.code, 3)
 
     def test_explicit_watch_overrides_the_profile_install_tree(self):
         install = self.watched_profile()

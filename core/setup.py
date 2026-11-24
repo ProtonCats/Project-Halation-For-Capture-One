@@ -35,8 +35,9 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 
 if __package__:
-    from . import prefix as px, runner, treehash, display_profile
+    from . import peversion, prefix as px, runner, treehash, display_profile
 else:
+    import peversion
     import prefix as px
     import runner
     import treehash
@@ -164,6 +165,51 @@ def unchanged(path, before):
     if before is None:
         return not os.path.lexists(path)
     return path.is_dir() and not path.is_symlink() and not treehash.compare(path, before["entries"])
+
+
+def write_marker(prefix, record):
+    fd, temp = tempfile.mkstemp(prefix=".setup-", dir=prefix)
+    try:
+        with os.fdopen(fd, "w") as out:
+            json.dump(record, out)
+            out.write("\n")
+        os.replace(temp, prefix / MARKER)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def program_version(install, relative):
+    path = install / relative
+    if path.is_symlink() or not path.resolve().is_relative_to(install.resolve()):
+        return None
+    return peversion.file_version(path)
+
+
+def accept_update(prefix, record, relative):
+    """Record the folder of an app that updated itself; False when nothing shows that it did.
+
+    The program's own version must differ from the recorded one. A marker from before versions were recorded counts
+    only when the program file itself changed.
+    """
+    install = install_path(prefix, record["install_dir"])
+    if not relative or not install.is_dir():
+        return False
+    new, old = program_version(install, relative), record.get("program_version")
+    if not new or new == old:
+        return False
+    if old is None:
+        entry = next((e for e in record["install_tree"]["entries"] if e["path"] == relative), None)
+        if entry is None or entry.get("sha256") == runner.sha256(install / relative):
+            return False
+    tree = snapshot(install)
+    before, after = ({e["path"]: e for e in entries} for entries in (record["install_tree"]["entries"], tree["entries"]))
+    count = sum(before.get(path) != after.get(path) for path in before.keys() | after.keys()
+                if (before.get(path) or after[path])["type"] != "dir")
+    write_marker(prefix, {**record, "install_tree": tree, "program": relative, "program_version": new})
+    print(f"the app updated itself: {old or 'an earlier version'} to {new} ({count} files changed); "
+          "its folder is recorded as the known-good one", flush=True)
+    return True
 
 
 def guarded(prefix, relative, action, allow_creation=False):
@@ -316,7 +362,8 @@ def apply(args):
         old = json.loads(marker.read_text())
         if old["profile_sha256"] != digest:
             die("a different profile is already applied; use a fresh prefix")
-        if not px.ready(prefix) or not unchanged(install, old["install_tree"]):
+        if not px.ready(prefix) or not (unchanged(install, old["install_tree"])
+                                        or accept_update(prefix, old, profile.get("program"))):
             die("recorded install folder changed or prefix is not ready")
         print("profile already applied; nothing changed")
         return 0
@@ -366,15 +413,10 @@ def apply(args):
     final = snapshot(install_path(prefix, relative))
     if final is None:
         die("installer did not create install_dir")
-    fd, temp = tempfile.mkstemp(prefix=".setup-", dir=prefix)
-    try:
-        with os.fdopen(fd, "w") as out:
-            json.dump({"profile_sha256": digest, "install_dir": relative, "install_tree": final}, out)
-            out.write("\n")
-        os.replace(temp, marker)
-    finally:
-        if os.path.exists(temp):
-            os.unlink(temp)
+    record = {"profile_sha256": digest, "install_dir": relative, "install_tree": final}
+    if profile.get("program"):
+        record.update(program=profile["program"], program_version=program_version(install, profile["program"]))
+    write_marker(prefix, record)
     print("profile applied; install folder recorded")
     return 0
 
@@ -394,7 +436,8 @@ def finish_netfx48(args):
         die("finish-netfx48 requires an existing Framework64 runtime with mscorlib.dll and a native mscoree override")
     relative, recorded = protected_install(prefix)
     install = install_path(prefix, relative)
-    if recorded and not unchanged(install, recorded["install_tree"]):
+    if recorded and not (unchanged(install, recorded["install_tree"])
+                         or accept_update(prefix, recorded, recorded.get("program"))):
         die("recorded install folder changed")
     version = registry_values(prefix, r"Software\Wine").get("version")
     if version == "win10" and all(overrides.get(dll) == "builtin" for dll in NETFX48_BUILTINS):

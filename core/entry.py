@@ -130,7 +130,8 @@ def setup_main(argv=None):
             executable(pfx, profile)
             return (marker["profile_sha256"] == runner.sha256(PROFILE) and prefix.ready(pfx)
                     and prefix.forward_ok(pfx, prefix.runner_version(assembled)[0])
-                    and profiles.unchanged(profiles.install_path(pfx, profile["install_dir"]), marker["install_tree"]))
+                    and (profiles.unchanged(profiles.install_path(pfx, profile["install_dir"]), marker["install_tree"])
+                         or profiles.accept_update(pfx, marker, profile.get("program"))))
 
         steps = [
             ("fetch", base, fetched, runner.main, ["fetch", "--pins", str(PINS), "--dest", str(base.parent)]),

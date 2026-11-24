@@ -145,6 +145,8 @@ git pull
 ./setup ~/Downloads/<the Capture One installer>.exe
 ```
 
+**When Capture One updates itself**, let it finish and start it again. The next `./setup` sees the new version, says so and records the new files.
+
 Setup checks every finished step. If an update changed one, setup stops and names the folder to remove; remove it and run setup again. Setup never names a finished prefix (`pfx`) for removal.
 
 **Keep `pfx`.** It holds your installed Capture One, its settings and its activation. If setup says the prefix is not as it left it, for example after Capture One updated itself, leave it alone and start the app with `./run`.

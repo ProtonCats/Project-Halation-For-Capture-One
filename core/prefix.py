@@ -25,6 +25,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+if __package__:
+    from . import peversion
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import peversion
+
 HERE = Path(__file__).resolve().parent
 MARKER = ".runner.json"
 
@@ -169,7 +175,7 @@ def run(a):
         die("run needs a program after --")
     if not ready(prefix):
         die(f"{prefix} is not a ready prefix; run create first")
-    extra = {}
+    extra, program = {}, None
     watch = a.watch
     if getattr(a, "profile", None):
         try:
@@ -188,6 +194,8 @@ def run(a):
                 if path == prefix or not path.is_relative_to(prefix):
                     raise ValueError("install_dir must stay inside the prefix")
                 watch = str(path)
+                if isinstance(profile.get("program"), str):
+                    program = path / profile["program"]
         except (OSError, ValueError, TypeError) as ex:
             die(f"invalid launch profile: {ex}")
     record_runner(prefix, stamp, name)
@@ -197,6 +205,7 @@ def run(a):
         env["PROTON_ENABLE_WAYLAND"] = "1"
     if getattr(a, "opencl_vendors", None):
         env.setdefault("OCL_ICD_VENDORS", a.opencl_vendors)
+    version = peversion.file_version(program) if program else None
     with tempfile.TemporaryDirectory() as tmp:
         manifest = Path(tmp) / "tree.json"
         if watch:
@@ -209,7 +218,11 @@ def run(a):
             if watch:
                 cmp = subprocess.run([sys.executable, str(HERE / "treehash.py"), "compare", watch, str(manifest)],
                                      capture_output=True, text=True)
-                if cmp.returncode:
+                now = peversion.file_version(program) if program and cmp.returncode == 1 else None
+                if version and now and version != now:
+                    print(f"the app updated itself: {version} to {now} ({len(cmp.stdout.splitlines())} changes); "
+                          "the next setup records its folder", file=sys.stderr)
+                elif cmp.returncode:
                     print(cmp.stdout, end="", file=sys.stderr)
                     die(f"{watch} changed during the run", 3)
     return code
