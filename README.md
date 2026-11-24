@@ -178,7 +178,7 @@ The [reference](docs/reference.md) covers each step in detail: the runner build,
 | 1 | **The install folder is never modified** | Fixes live in the runner, the prefix or the launch environment, never in the app's files. | A hash of the install tree before and after every setup step and launch (`core/treehash.py`); a change fails the run. |
 | 2 | **Licensing is never touched** | Sign-in, trial, activation and machine checks run exactly as shipped. No code reads, emulates, skips or patches them. | Profile entries that touch authentication or licensing are refused (`core/setup.py`). |
 | 3 | **You bring the software** | Setup installs the copy you downloaded. Halation never downloads, mirrors or links it. | `./setup` takes a local installer and nothing else. |
-| 4 | **Every fix stands on its own** | Each Wine fix ships with a small Windows program that shows the bug without Capture One, so anyone can check it, and Wine can take it upstream. | `repro/`, one program per behaviour. |
+| 4 | **Every fix stands on its own** | Each Wine fix ships with a small Windows program that shows the bug without Capture One, so anyone can check it and report it to Wine. | `repro/`, one program per behaviour. |
 | 5 | **Nothing private leaves** | Logs, traces and machine details stay on the machine that made them. | Every push runs a leak check over each commit, message, path and ref (`tools/prepush.py`). |
 
 ## Wine patches
@@ -199,7 +199,7 @@ The [reference](docs/reference.md) covers each step in detail: the runner build,
 | `0011` winex11 | A window hidden right after it is shown stays hidden (backport of Wine `2b05f63811`) | `repro/p9-show-hide` |
 | `0012` wined3d | Partial copy presents are shown as full frames, so GPU-drawn windows draw completely | `repro/p1d-wpf-input` (`--autotype`) |
 
-Patches are LGPL-2.1-or-later, as Wine is, and are written to go upstream to WineHQ.
+Patches are LGPL-2.1-or-later, as Wine is. Each one's test program is ready for a WineHQ bug report.
 
 ## Status
 
