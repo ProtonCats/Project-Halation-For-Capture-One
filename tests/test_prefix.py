@@ -454,7 +454,7 @@ class Prefix(unittest.TestCase):
         mine, shell = px.os.getpid(), 10
         cases = [({"WINEPREFIX": f"{self.prefix}/pfx/"}, True), ({"STEAM_COMPAT_DATA_PATH": str(self.prefix)}, True),
                  ({"WINEPREFIX": str(self.prefix)}, True), ({"WINEPREFIX": str(other)}, False), ({"WINEPREFIX": ""}, False),
-                 ({"OTHER": str(self.prefix)}, False), ({"WINEPREFIX": "prefix"}, False), ({}, False)]
+                 ({"OTHER": str(self.prefix)}, False), ({"WINEPREFIX": px.os.path.relpath(self.prefix)}, False), ({}, False)]
         for number, (environment, found) in enumerate(cases):
             with self.subTest(environment=environment):
                 proc = self.root / f"proc{number}"

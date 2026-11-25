@@ -172,6 +172,7 @@ class Entry(unittest.TestCase):
         self.assertEqual(self.tree(), before)
         message = self.stderr.getvalue()
         self.assertNotIn("remove", message)
+        self.assertEqual(message.count("was left as it is"), 1, message)
         self.assertIn(f"{self.data / 'pfx'} was left as it is", message)
         self.assertIn("Keep it: it holds the installed app, its settings and its activation", message)
         return message
@@ -221,6 +222,13 @@ class Entry(unittest.TestCase):
             self.assertEqual(self.setup(), 0, self.stderr.getvalue())
             child.stdin.close()
             child.wait(10)
+        with self.subTest("a linked record"):
+            marker = pfx / en.profiles.MARKER
+            marker.rename(self.root / "record.json")
+            marker.symlink_to(self.root / "record.json")
+            self.assertIn("its record .setup.json cannot be read", self.refusal())
+            marker.unlink()
+            (self.root / "record.json").rename(marker)
         with self.subTest("a linked prefix"):
             pfx.rename(self.data / "elsewhere")
             pfx.symlink_to(self.data / "elsewhere")

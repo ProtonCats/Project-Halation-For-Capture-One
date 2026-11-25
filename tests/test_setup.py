@@ -754,6 +754,16 @@ class Setup(unittest.TestCase):
         self.assertIn("the app updated itself: 1.0.0.0 to 3.0.0.0", self.output.getvalue())
         self.assertNotIn("refused", json.loads(self.marker.read_text()))
 
+    def test_an_accepted_update_is_one_write_without_the_note(self):
+        self.versioned()
+        record = json.loads(self.marker.read_text())
+        st.write_marker(self.prefix, {**record, "refused": {"program.dll": None}})
+        self.put_program((2, 0, 0, 0))
+        with patch.object(st, "write_marker", wraps=st.write_marker) as write:
+            self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertEqual(write.call_count, 1)
+        self.assertNotIn("refused", json.loads(self.marker.read_text()))
+
     def test_a_restored_folder_is_accepted_after_a_step_changed_it(self):
         self.versioned()
         saved = (self.install / "bin/app.exe").read_bytes()
@@ -1135,6 +1145,20 @@ class Setup(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "install folder changed"):
             self.finish()
         self.assertEqual(self.events, ["version", "override", "override", "override"])
+        self.assertIn("program.dll", json.loads(self.marker.read_text())["refused"])
+
+    def test_finish_leaves_a_changed_folder_to_setup(self):
+        self.prepare_runtime()
+        (self.install / "program.dll").write_bytes(b"changed since")
+        before = self.marker.read_bytes()
+        with self.assertRaisesRegex(SystemExit, "its install folder changed since setup recorded it; run ./setup first"):
+            self.finish()
+        self.assertEqual((self.events, self.marker.read_bytes()), ([], before))
+
+    def test_finish_works_in_a_prefix_without_a_record(self):
+        self.prepare_runtime(recorded=False)
+        self.assertEqual(self.finish(), 0, self.errors.getvalue())
+        self.assertFalse(self.marker.exists())
 
 
 if __name__ == "__main__":
