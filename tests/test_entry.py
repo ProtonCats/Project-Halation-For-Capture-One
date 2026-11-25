@@ -41,6 +41,9 @@ class Entry(unittest.TestCase):
         self.enterContext(patch.object(en.shutil, "which", return_value="available"))
         self.enterContext(patch.object(en.runner, "llvm_ar", return_value="available"))
         self.enterContext(patch.object(en.runner, "missing_packages", return_value=[]))
+        host = Path(self.enterContext(tempfile.TemporaryDirectory()))  # an OpenCL list of the tests' own, not the machine's
+        (host / "any.icd").write_text("libany.so\n")
+        self.enterContext(patch.object(en, "OPENCL_HOST", host))
         self.enterContext(patch.object(en.runner, "main", side_effect=self.stage))
         self.enterContext(patch.object(en.profiles, "main", side_effect=self.stage))
         self.stdout = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
