@@ -148,7 +148,7 @@ git pull
 
 Setup checks every finished step. When an update of Halation changes a patch or the GE-Proton release, setup builds the new runner beside the one you have and switches over at the end; close Capture One for that. If the build fails, the old runner stays in use.
 
-**When Halation's profile changes**, close Capture One first. Setup applies the difference to the prefix you have: the installer does not run again and the app's files are not touched.
+**When Halation's profile changes**, close Capture One first. Setup applies the difference to the prefix you have: the installer does not run again and the app's files are not touched. The same happens after a new GE-Proton release, whose first start sets some of the settings anew.
 
 **When Capture One updates itself**, let the update finish and close the app, then run `./setup`. It recognises an update by the program's higher version and records the new files. This has been tested with stand-in programs, not yet with a real Capture One update.
 

@@ -117,6 +117,14 @@ Setup applies the difference to the existing prefix: registry values, overrides,
 - **The app must be closed.** Setup looks for the prefix in the environment of your own processes and stops when one uses it.
 - **A change that fails** is repeated by the next setup, also when you have gone back to the old profile: until every step is done, the record says that no profile is applied. Prerequisites are recorded as they finish.
 
+### A new runner
+
+A runner of another GE-Proton release sets some of the profile's values anew at its first start in a prefix: Wine applies the runner's `wine.inf` whenever that file's time is not the one noted in the prefix.
+
+- **Setup notices** by that time and by when Wine noted it, recorded as `wine_inf` and `wine_inf_noted` in `.setup.json`; a copy of a prefix that does not keep file times gets its settings written once. It lets the runner update the prefix first, without a window, then writes the Windows version, overrides and registry values over it. Prerequisites do not run again, and the app must be closed.
+- **A record without the time** gets its settings written once.
+- **`./run`** says it in one line and starts as usual; `./setup` writes the settings again.
+
 ### An app that updated itself
 
 Setup takes a changed install folder for the app's own update, prints both versions and records the new folder, when all of this holds:

@@ -5,6 +5,7 @@ import contextlib
 import io
 import fcntl
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,31 @@ class Prefix(unittest.TestCase):
             marker.mkdir()
             with self.assertRaises(SystemExit):
                 px.forward_ok(d, 1)
+
+    def test_the_time_of_the_runner_file_and_what_the_prefix_noted_of_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            runner, prefix = Path(d) / "runner", Path(d) / "prefix"
+            inf, note = runner / "files/share/wine/wine.inf", prefix / ".update-timestamp"
+            prefix.mkdir()
+            self.assertIsNone(px.inf_time(runner))
+            self.assertIsNone(px.applied_inf(prefix))
+            self.assertIsNone(px.noted_inf(prefix))
+            inf.parent.mkdir(parents=True)
+            inf.write_bytes(b"")
+            os.utime(inf, ns=(1500 * 10**9 + 999_999_999, 1500 * 10**9 + 999_999_999))
+            self.assertEqual(px.inf_time(runner), 1500)
+            for text, wanted in (("1500", 1500), ("1500\n", 1500), ("  1500 rest", 1500), ("", None), ("x1500", None),
+                                 ("disable", "disable"), ("disabled\n", "disable"), ("not disable", None)):
+                with self.subTest(text=text):
+                    note.write_text(text)
+                    self.assertEqual(px.applied_inf(prefix), wanted)
+            os.utime(note, ns=(7, 123_456_789_012))
+            self.assertEqual(px.noted_inf(prefix), 123_456_789_012)
+            note.write_bytes(b"\xff\xfe")
+            self.assertIsNone(px.applied_inf(prefix))
+            note.unlink()
+            note.mkdir()
+            self.assertIsNone(px.applied_inf(prefix))
 
     def test_forward_only(self):
         with tempfile.TemporaryDirectory() as d:

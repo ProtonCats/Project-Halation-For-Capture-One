@@ -21,6 +21,8 @@ an absent install_dir; no step may change an existing one. Completed profiles ar
 recorded in .setup.json, the record before in .setup.json.previous. A changed profile is
 applied to the existing prefix: its registry values, overrides, Windows version and new
 prerequisites; the installer does not run again, and a changed install_dir is refused.
+A runner of another release overwrites some settings at its first start: they are written
+again when its wine.inf is not the one they were last written over.
 A changed folder is taken for the app's own update, and recorded, only when the recorded
 program has a higher version and nothing runs in the prefix. --dry-run writes nothing.
 """
@@ -322,8 +324,33 @@ def examine(prefix, profile, digest, runner_dir):
     version = updated(prefix, record, program, tree, changed) if changed else None
     if program and not ((install / program).is_file() and (install / program).resolve().is_relative_to(install.resolve())):
         refuse(prefix, f"the program {program} is not in its install folder")
-    same = record["profile_sha256"] == digest
+    same = record["profile_sha256"] == digest and settled(record, runner_dir, prefix)
     return State(record, tree, version, bool(version) or not same or filled(record, install, profile) != record)
+
+
+def settled(record, runner_dir, prefix):
+    """Whether the settings were written over the wine.inf of this runner, and no other one was applied since."""
+    present, applied = px.inf_time(runner_dir), px.applied_inf(prefix)
+    return record.get("wine_inf") == present and (
+        applied == "disable" or applied == present and record.get("wine_inf_noted") == px.noted_inf(prefix))
+
+
+def written_over(runner_dir, prefix):
+    """What a marker says of settings just written: the time of the runner's wine.inf, once the prefix carries it, and
+    when that was noted there: after another runner's start and one of this runner the time alone would be the same."""
+    present = px.inf_time(runner_dir)
+    if present is None or px.applied_inf(prefix) not in (present, "disable"):
+        return {}
+    return {"wine_inf": present, "wine_inf_noted": px.noted_inf(prefix)}
+
+
+def overwritten(prefix, runner_dir):
+    """Whether recorded settings were overwritten by a runner, or will be at the next start; a look that never fails."""
+    try:
+        record = read_marker(prefix)
+    except Refused:
+        return False
+    return "wine_inf" in record and not settled(record, runner_dir, prefix)
 
 
 def filled(record, install, profile):
@@ -423,8 +450,14 @@ def windows(runner_dir, prefix, relative, action, allow_creation=False, record=N
     log = prefix / ".setup.log"
     if log.is_symlink():
         die("unsafe setup log")
-    def step(args, check=True, timeout=WINDOWS_TIMEOUT, missing_ok=False):
+    def wait(env):
+        runner.run([str(runner_dir / "files/bin/wineserver"), "-w"], env=env, log=log, timeout=SERVER_TIMEOUT)
+    def step(args, check=True, timeout=WINDOWS_TIMEOUT, missing_ok=False, quiet=False):
         command = [str(runner_dir / "files/bin/wine")] + args
+        if quiet:  # no display, so no window; ended before the next step, which may need one
+            hidden = {key: value for key, value in env.items() if key not in ("DISPLAY", "WAYLAND_DISPLAY")}
+            runner.run(command, env=hidden, log=log, timeout=timeout)
+            return wait(hidden)
         if missing_ok:
             try:
                 result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout)
@@ -448,7 +481,7 @@ def windows(runner_dir, prefix, relative, action, allow_creation=False, record=N
         try:
             return action(step)
         finally:
-            runner.run([str(runner_dir / "files/bin/wineserver"), "-w"], env=env, log=log, timeout=SERVER_TIMEOUT)
+            wait(env)
     return guarded(prefix, relative, execute, allow_creation, record)
 
 
@@ -472,10 +505,9 @@ def protected_install(prefix):
     return relative, recorded
 
 
-def configure(profile, items, paths, begin=lambda: None, done=lambda item: None):
+def configure(profile, items, paths, done=lambda item: None):
     """The Windows steps that shape a prefix: the given prerequisites, then version, overrides and registry values."""
     def steps(step):
-        begin()
         for item, path in zip(items, paths):
             if runner.sha256(path) != item["sha256"]:
                 path.unlink()
@@ -547,7 +579,7 @@ def bring_up_to_date(args, profile, digest, runner_dir, prefix, cache):
             write_marker(prefix, record)
         print(f"the app updated itself: {old} to {state.version} ({len(files)} files changed); its folder "
               f"{'would be' if args.dry_run else 'is'} recorded as the known-good one", flush=True)
-    if record["profile_sha256"] != digest:
+    if record["profile_sha256"] != digest or not settled(record, runner_dir, prefix):
         return update_profile(args, profile, digest, record, cache)
     complete = filled(record, install, profile)
     if complete != record and not args.dry_run:
@@ -557,13 +589,16 @@ def bring_up_to_date(args, profile, digest, runner_dir, prefix, cache):
 
 
 def update_profile(args, profile, digest, record, cache):
-    """Apply a changed profile to a prefix whose install folder was just found to be the recorded one."""
+    """Apply a changed profile, or one a runner overwrote, to a prefix whose install folder is the recorded one."""
     runner_dir, prefix, stamp, name = px.checked_runner(args)
     relative, install = record["install_dir"], install_path(prefix, record["install_dir"])
     ran = recorded(record.get("prerequisites", []))
     items = [item for item in profile["prerequisites"] if recorded([item])[0] not in ran]
-    steps = items or record.get("shape") != shape(profile)
+    anew = not settled(record, runner_dir, prefix)
+    steps = items or anew or record.get("shape") != shape(profile)
     if steps:
+        if anew:
+            print("a runner set some of the settings anew; they are written again")
         print(f"update prefix {prefix}; set Windows version {profile['windows_version']}")
         announce(profile, items)
     else:
@@ -571,23 +606,41 @@ def update_profile(args, profile, digest, record, cache):
     if args.dry_run:
         return 0
     refuse_running(prefix)
-    record = dict(record)
     if steps:
         paths = prerequisites(items, cache)
         refuse_running(prefix)
-        def begin():
-            px.record_runner(prefix, stamp, name)
-            record.update(profile_sha256="", shape=None)
-            write_marker(prefix, record)
-        def done(item):
-            record["prerequisites"] = recorded([item], record.get("prerequisites", []))
-            write_marker(prefix, record)
-        windows(runner_dir, prefix, relative, configure(profile, items, paths, begin, done), record=record)
+        record = write_settings(runner_dir, prefix, stamp, name, profile, record, items, paths)
     if not unchanged(install, record["install_tree"]):
         refuse(prefix, "its install folder changed after it was checked; run setup again")
     write_marker(prefix, with_version(applied_record(record, profile, digest), install, profile))
     print("profile updated in place; the app and its folder were not touched")
     return 0
+
+
+def write_settings(runner_dir, prefix, stamp, name, profile, record, items=(), paths=()):
+    """Bring the prefix to the runner's wine.inf, then run the prerequisites given and write the profile's settings over it.
+
+    Returns the record to write once the install folder is checked; until then the marker vouches for nothing.
+    """
+    record = dict(record)
+    interrupted = not record["profile_sha256"]
+    def done(item):
+        record["prerequisites"] = recorded([item], record.get("prerequisites", []))
+        write_marker(prefix, record)
+    def steps(step):
+        px.record_runner(prefix, stamp, name)
+        record.update(profile_sha256="", shape=None)
+        for key in ("wine_inf", "wine_inf_noted"):
+            record.pop(key, None)
+        write_marker(prefix, record)
+        present, noted = px.inf_time(runner_dir), px.applied_inf(prefix)
+        if present is not None and noted != "disable" and (noted != present or interrupted):
+            step(["wineboot", "-u"], quiet=True)
+            if px.applied_inf(prefix) != present:
+                die(f"{name} did not bring the prefix up to date; run setup again")
+        configure(profile, items, paths, done)(step)
+    windows(runner_dir, prefix, record["install_dir"], steps, record=record)
+    return {**record, **written_over(runner_dir, prefix)}
 
 
 def program(path, args):
@@ -638,7 +691,7 @@ def apply(args):
     final = snapshot(install_path(prefix, relative))
     if final is None:
         die("installer did not create install_dir")
-    record = applied_record({"install_dir": relative, "install_tree": final}, profile, digest)
+    record = applied_record({"install_dir": relative, "install_tree": final, **written_over(runner_dir, prefix)}, profile, digest)
     write_marker(prefix, with_version(record, install, profile))
     print("profile applied; install folder recorded")
     return 0

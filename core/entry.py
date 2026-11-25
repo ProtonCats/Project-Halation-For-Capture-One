@@ -351,6 +351,8 @@ def run_main(argv=None):
             with rebuild.lock(data):  # setup was stopped in the middle of a switch
                 rebuild.recover(data)
         program = executable(data / "pfx", profile)
+        if profiles.overwritten(data / "pfx", data / "runners/patched"):
+            print("run: a runner set some of the app's settings anew; run ./setup to write them again", file=sys.stderr)
         vendors = opencl_vendors(data)
         if vendors is None:
             print("run: the host lists no OpenCL driver (/etc/OpenCL/vendors); image processing stays on the CPU",

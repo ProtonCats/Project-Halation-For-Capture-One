@@ -792,6 +792,81 @@ class Entry(unittest.TestCase):
         program.symlink_to(self.installer)
         self.assertEqual(en.run_main(["--data", str(self.data)]), 2)
 
+    def test_setup_writes_the_settings_again_over_another_runner(self):
+        pfx, _ = self.finished()
+        self.real_apply()
+        marker, note = pfx / en.profiles.MARKER, pfx / ".update-timestamp"
+        inf = self.data / "runners/patched/files/share/wine/wine.inf"
+        self.put(inf, b"the same in every release")
+        os.utime(inf, (1000, 1000))
+        def wine(cmd, **kwargs):
+            note.write_text(str(int(inf.stat().st_mtime)))
+            return self.wine(cmd, **kwargs)
+        settings = [["wine", "winecfg", "-v", "win10"], ["wineserver", "-w"]]
+        update = [["wine", "wineboot", "-u"], ["wineserver", "-w"]]
+        with patch.object(en.prefix.subprocess, "run", side_effect=wine):
+            self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+            self.assertEqual(self.ran, update + settings)
+            for seconds, ran in ((1000, []), (2000, update + settings), (2000, [])):
+                with self.subTest(seconds=seconds, steps=len(ran)):
+                    os.utime(inf, (seconds, seconds))
+                    self.ran.clear()
+                    tree = en.profiles.snapshot(pfx / "drive_c/Program Files/Example")
+                    self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+                    self.assertEqual(self.ran, ran)
+                    self.assertEqual(json.loads(marker.read_text())["wine_inf"], seconds)
+                    self.assertEqual(en.profiles.snapshot(pfx / "drive_c/Program Files/Example"), tree)
+            def release(args):
+                code = self.stage_release(args, "Release-2", 300)
+                if args[0] == "assemble":
+                    new = Path(args[args.index("--out") + 1])
+                    self.put(new / "files/bin/wine", b"wine")
+                    self.put(new / "files/share/wine/wine.inf", inf.read_bytes())
+                    os.utime(new / "files/share/wine/wine.inf", (3000, 3000))
+                return code
+            with self.subTest("a new pin"):
+                self.pins.write_text(json.dumps({"ge_tag": "Release-2", "ge_asset": "Release-2-x86_64"}))
+                self.ran.clear()
+                with patch.object(en.runner, "main", side_effect=release):
+                    self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+                self.assertEqual(json.loads((self.data / "runners/patched/halation-runner.json").read_text())["base"], "Release-2")
+                self.assertEqual(self.ran, update + settings)
+                self.assertEqual(json.loads(marker.read_text())["wine_inf"], 3000)
+                self.assertEqual(en.profiles.snapshot(pfx / "drive_c/Program Files/Example"), tree)
+                self.ran.clear()
+                self.assertEqual((self.setup(), self.ran), (0, []), self.stderr.getvalue())
+
+    def test_run_says_when_a_runner_set_the_settings_anew_and_starts(self):
+        self.assertEqual(self.setup(), 0)
+        pfx, inf = self.data / "pfx", self.data / "runners/patched/files/share/wine/wine.inf"
+        self.put(inf, b"the same in every release")
+        os.utime(inf, (1000, 1000))
+        self.put(pfx / ".update-timestamp", b"1000\n")
+        marker = pfx / en.profiles.MARKER
+        plain = {k: v for k, v in json.loads(marker.read_text()).items() if k != "wine_inf"}
+        cases = (("as recorded", 1000, b"1000", {"wine_inf": 1000}, False), ("a new runner", 2000, b"1000", {"wine_inf": 1000}, True),
+                 ("another runner was in it", 1000, b"1500", {"wine_inf": 1000}, True), ("a marker from before", 2000, b"1000", {}, False),
+                 ("another runner and this one again", 1000, b"1000", {"wine_inf": 1000, "wine_inf_noted": 1}, True),
+                 ("wine may not update it", 1000, b"disable", {"wine_inf": 1000}, False), ("no record", 2000, b"1000", None, False),
+                 ("an unreadable record", 2000, b"1000", "{", False))
+        for name, seconds, note, record, said in cases:
+            with self.subTest(name=name):
+                os.utime(inf, (seconds, seconds))
+                (pfx / ".update-timestamp").write_bytes(note)
+                marker.unlink(missing_ok=True)
+                if isinstance(record, dict):
+                    noted = {"wine_inf_noted": en.prefix.noted_inf(pfx)} if record else {}
+                    record = json.dumps({**plain, **noted, **record})
+                if record is not None:
+                    marker.write_text(record)
+                before = en.profiles.treehash.snapshot(pfx)
+                self.stderr.truncate(0)
+                self.stderr.seek(0)
+                with patch.object(en.prefix, "main", return_value=7):
+                    self.assertEqual(en.run_main(["--data", str(self.data)]), 7)
+                self.assertEqual("run ./setup to write them again" in self.stderr.getvalue(), said)
+                self.assertEqual(en.profiles.treehash.compare(pfx, before), [])
+
     def test_opencl_vendor_list_is_rebuilt_without_rusticl(self):
         host = self.root / "vendors"
         host.mkdir()

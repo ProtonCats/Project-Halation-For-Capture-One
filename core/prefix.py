@@ -110,6 +110,32 @@ def ready(prefix):
     return reg.is_file() and "ProgramFilesDir" in reg.read_text(errors="replace")
 
 
+def inf_time(runner):
+    """The time of the runner's wine.inf, by which Wine decides at each start whether to apply it; None without one."""
+    try:
+        return int((Path(runner) / "files/share/wine/wine.inf").stat().st_mtime)
+    except OSError:
+        return None
+
+
+def applied_inf(prefix):
+    """What Wine noted in the prefix: the time of the wine.inf it applied last, "disable" when it may not, or None."""
+    try:
+        text = (Path(prefix) / ".update-timestamp").read_text()
+    except (OSError, UnicodeError):
+        return None
+    number = re.match(r"\s*(\d+)", text)
+    return "disable" if text.startswith("disable") else int(number[1]) if number else None
+
+
+def noted_inf(prefix):
+    """When Wine wrote that note, which it does only when it applies a wine.inf of another time; None without one."""
+    try:
+        return (Path(prefix) / ".update-timestamp").stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 def environment(runner, prefix, wined3d=False, base=None):
     """The environment for umu-run: inherited Wine, Proton, umu and DXVK settings dropped, ours set."""
     env = {k: v for k, v in (base if base is not None else os.environ).items()

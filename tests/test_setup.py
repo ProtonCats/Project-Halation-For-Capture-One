@@ -49,6 +49,7 @@ class Setup(unittest.TestCase):
         self.types = {}
         self.tamper, self.fail_step = None, False
         self.fail_at = self.tamper_program = None
+        self.runner_sets, self.stuck, self.starts = {}, False, 0
         self.install_files = {}
         self.enterContext(patch.object(st.px.shutil, "which", return_value="available"))
         self.enterContext(patch.object(st.px.subprocess, "run", side_effect=self.process))
@@ -78,16 +79,32 @@ class Setup(unittest.TestCase):
             raise data
         return io.BytesIO(data)
 
+    def start(self):
+        """What Wine does before a program runs: wine.inf is applied when its time is not the one noted in the prefix."""
+        inf, note = self.runner / "files/share/wine/wine.inf", self.prefix / ".update-timestamp"
+        if not inf.is_file() or note.is_file() and note.read_text().startswith("disable"):
+            return
+        now = str(int(inf.stat().st_mtime))
+        if not self.stuck and not (note.is_file() and note.read_text().strip() == now):
+            note.write_text(now + "\n")
+            self.starts += 1
+            os.utime(note, (self.starts, self.starts))
+            self.registry.update(self.runner_sets)
+
     def process(self, cmd, **kwargs):
         if Path(cmd[0]).name == "wineserver":
             return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "umu-run":
             self.prefix.mkdir(parents=True, exist_ok=True)
             (self.prefix / "system.reg").write_text('"ProgramFilesDir"="C:\\\\Program Files"\n')
+            self.start()
             stage = "create"
         else:
+            self.start()
             args = cmd[1:]
-            if args[0] == "winecfg":
+            if args[0] == "wineboot":
+                stage = "wineboot"
+            elif args[0] == "winecfg":
                 self.registry["version"] = args[args.index("-v") + 1]
                 stage = "version"
             elif args[0] == "reg":
@@ -1000,6 +1017,262 @@ class Setup(unittest.TestCase):
             with self.subTest(environment=environment), self.assertRaises(ValueError):
                 st.load_profile(json.dumps({**self.profile, "environment": environment}))
         self.assertEqual(st.validate_environment({"VALID_2": ""}), {"VALID_2": ""})
+
+    def runner_file(self, seconds):
+        """The runner's wine.inf: always the same bytes, only its time tells one release from another."""
+        inf = self.runner / "files/share/wine/wine.inf"
+        inf.parent.mkdir(parents=True, exist_ok=True)
+        inf.write_bytes(b"the same in every release")
+        os.utime(inf, (seconds, seconds))
+
+    def follows(self):
+        """A finished prefix of a runner from second 1000, whose profile sets a value that every wine.inf sets too."""
+        key = "HKCU\\Software\\Wine\\Fonts\\Replacements"
+        self.value, self.runner_sets = (key, "Example UI"), {(key, "Example UI"): "the runner's"}
+        self.profile["registry"].append({"key": key, "name": "Example UI", "type": "REG_SZ", "data": "the profile's"})
+        self.write_profile()
+        self.runner_file(1000)
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertEqual(self.registry[self.value], "the profile's")
+        self.before = st.snapshot(self.install)
+
+    def noted(self, text=None):
+        note = self.prefix / ".update-timestamp"
+        if text is not None:
+            note.write_text(text)
+        return note.read_text().strip()
+
+    def settled(self, seconds, events):
+        """The last apply took these steps, the profile's value is in place, and the next apply takes none."""
+        self.assertEqual(self.events, events)
+        self.assertEqual(self.registry[self.value], "the profile's")
+        record = json.loads(self.marker.read_text())
+        self.assertEqual((record["wine_inf"], record["profile_sha256"]), (seconds, st.runner.sha256(self.profile_file)))
+        self.assertEqual(st.snapshot(self.install), self.before)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.events, [])
+        self.assertIn("nothing changed", self.output.getvalue())
+
+    SETTINGS = ["version", "override", "override", "registry", "registry", "registry"]
+
+    def test_a_start_with_a_new_runner_overwrites_what_its_file_sets(self):
+        self.follows()
+        self.start()
+        self.assertEqual(self.registry[self.value], "the profile's")
+        self.runner_file(2000)
+        self.start()
+        self.assertEqual(self.registry[self.value], "the runner's")
+
+    def test_a_first_setup_records_the_time_of_the_runner_file(self):
+        self.follows()
+        self.assertEqual(json.loads(self.marker.read_text())["wine_inf"], 1000)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.events, [])
+
+    def test_a_first_setup_whose_prefix_does_not_note_the_time_records_none(self):
+        self.stuck = True
+        self.runner_file(1000)
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertIsNone(json.loads(self.marker.read_text()).get("wine_inf"))
+
+    def test_settings_are_written_again_over_a_new_runner(self):
+        self.follows()
+        self.runner_file(2000)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.noted(), "2000")
+        self.assertIn("a runner set some of the settings anew", self.output.getvalue())
+        self.settled(2000, ["wineboot", *self.SETTINGS])
+
+    def test_the_update_of_the_prefix_shows_no_window_and_ends_before_the_settings(self):
+        self.follows()
+        self.runner_file(2000)
+        seen, real = [], self.process
+        def process(cmd, **kwargs):
+            seen.append((Path(cmd[0]).name, cmd[1], {"DISPLAY", "WAYLAND_DISPLAY"} & set(kwargs["env"]), kwargs["env"]["WINEPREFIX"]))
+            return real(cmd, **kwargs)
+        with patch.dict(os.environ, {"DISPLAY": ":7", "WAYLAND_DISPLAY": "wayland-7"}), \
+                patch.object(st.px.subprocess, "run", side_effect=process):
+            self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        shown, prefix = {"DISPLAY", "WAYLAND_DISPLAY"}, str(self.prefix)
+        self.assertEqual(seen[:3], [("wine", "wineboot", set(), prefix), ("wineserver", "-w", set(), prefix), ("wine", "winecfg", shown, prefix)])
+        self.assertEqual(seen[-1], ("wineserver", "-w", shown, prefix))
+
+    def test_an_older_runner_file_counts_as_another_one_too(self):
+        self.follows()
+        self.runner_file(500)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(500, ["wineboot", *self.SETTINGS])
+
+    def test_settings_a_start_already_overwrote_are_written_again(self):
+        self.follows()
+        for seconds in (2000, 500):
+            with self.subTest(seconds=seconds):
+                self.runner_file(seconds)
+                self.start()
+                self.assertEqual(self.registry[self.value], "the runner's")
+                self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+                self.settled(seconds, self.SETTINGS)
+
+    def test_settings_are_written_again_after_another_runner_was_in_the_prefix(self):
+        for note in ("1500", "", "no number", "10000"):
+            with self.subTest(note=note):
+                if not self.prefix.exists():
+                    self.follows()
+                self.noted(note)
+                self.registry.update(self.runner_sets)
+                self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+                self.assertEqual(self.noted(), "1000")
+                self.settled(1000, ["wineboot", *self.SETTINGS])
+
+    def test_settings_lost_to_another_runner_are_written_again_when_the_note_is_the_recorded_one(self):
+        self.follows()
+        for seconds in (1500, 1000):
+            self.runner_file(seconds)
+            self.start()
+        self.assertEqual((self.noted(), self.registry[self.value]), ("1000", "the runner's"))
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(1000, self.SETTINGS)
+
+    def test_a_missing_note_counts_as_another_runner(self):
+        self.follows()
+        (self.prefix / ".update-timestamp").unlink()
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(1000, ["wineboot", *self.SETTINGS])
+
+    def test_a_prefix_that_wine_may_not_update_is_left_alone(self):
+        self.follows()
+        self.noted("disable")
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.events, [])
+        self.runner_file(2000)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.noted(), "disable")
+        self.settled(2000, self.SETTINGS)
+
+    def test_a_marker_without_the_time_gets_its_settings_written_once(self):
+        self.follows()
+        for note, events in (("1000", self.SETTINGS), ("1500", ["wineboot", *self.SETTINGS])):
+            with self.subTest(note=note):
+                record = json.loads(self.marker.read_text())
+                del record["wine_inf"], record["wine_inf_noted"]
+                self.marker.write_text(json.dumps(record))
+                self.noted(note)
+                self.registry.update(self.runner_sets)
+                self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+                self.settled(1000, events)
+
+    def test_a_profile_change_alone_does_not_update_the_prefix(self):
+        self.follows()
+        self.profile["registry"][0]["data"] = 0
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(1000, self.SETTINGS)
+
+    def test_a_new_prerequisite_runs_over_the_updated_prefix_and_an_old_one_not_again(self):
+        self.follows()
+        self.second_prerequisite()
+        self.runner_file(2000)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(2000, ["wineboot", "prerequisite", *self.SETTINGS])
+
+    def test_a_launch_only_change_over_a_new_runner_writes_the_settings(self):
+        self.follows()
+        self.profile["environment"] = {"EXAMPLE": "1"}
+        self.runner_file(2000)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(2000, ["wineboot", *self.SETTINGS])
+
+    def test_a_prefix_that_does_not_take_the_runner_file_stops_before_the_settings(self):
+        self.follows()
+        self.runner_file(2000)
+        self.stuck = True
+        with self.assertRaisesRegex(SystemExit, "did not bring the prefix up to date"):
+            self.reapply()
+        self.assertEqual(self.events, ["wineboot"])
+        record = json.loads(self.marker.read_text())
+        self.assertEqual((record["profile_sha256"], record["shape"], record.get("wine_inf")), ("", None, None))
+        self.stuck = False
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(2000, ["wineboot", *self.SETTINGS])
+
+    def test_a_failed_step_over_a_new_runner_is_repeated(self):
+        self.follows()
+        for seconds, stage in enumerate(("wineboot", "version", "override", "registry"), 2000):
+            with self.subTest(stage=stage):
+                self.runner_file(seconds)
+                self.fail_at = stage
+                with self.assertRaises((SystemExit, RuntimeError)):
+                    self.reapply()
+                self.fail_at = None
+                record = json.loads(self.marker.read_text())
+                self.assertEqual((record["profile_sha256"], record["shape"], record.get("wine_inf")), ("", None, None))
+                self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+                self.settled(seconds, ["wineboot", *self.SETTINGS])
+
+    def test_an_interrupted_profile_change_updates_the_prefix_again(self):
+        self.follows()
+        self.profile["registry"][0]["data"] = 0
+        self.fail_at = "version"
+        with self.assertRaises((SystemExit, RuntimeError)):
+            self.reapply()
+        self.assertEqual(self.events, ["version"])
+        self.fail_at = None
+        self.noted("disable")
+        with self.subTest("not where Wine may not"):
+            self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+            self.settled(1000, self.SETTINGS)
+
+    def test_the_settings_wait_until_the_app_is_closed(self):
+        self.follows()
+        self.runner_file(2000)
+        stop = self.running()
+        self.events = []
+        self.refused("a program still runs in it")
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.noted(), "1000")
+        stop()
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.settled(2000, ["wineboot", *self.SETTINGS])
+
+    def test_an_update_of_the_prefix_that_touches_the_app_is_refused(self):
+        self.follows()
+        self.runner_file(2000)
+        self.tamper = "wineboot"
+        with self.assertRaisesRegex(SystemExit, "install folder changed during a Windows step"):
+            self.reapply()
+        self.tamper = None
+        self.refused("as a Halation step left it")
+
+    def test_a_dry_run_over_a_new_runner_says_so_and_writes_nothing(self):
+        self.follows()
+        self.runner_file(2000)
+        before = st.treehash.snapshot(self.root)
+        self.assertEqual(self.reapply("--dry-run"), 0, self.errors.getvalue())
+        self.assertEqual(st.treehash.compare(self.root, before), [])
+        self.assertEqual(self.events, [])
+        self.assertIn("a runner set some of the settings anew", self.output.getvalue())
+        self.assertIn("registry HKCU\\Software\\Wine\\Fonts\\Replacements Example UI", self.output.getvalue())
+
+    def test_an_app_update_and_a_new_runner_both_take_effect(self):
+        self.follows()
+        self.profile["program"] = "bin/app.exe"
+        self.put_program((1, 0, 0, 0))
+        record = json.loads(self.marker.read_text())
+        st.write_marker(self.prefix, {**record, "install_tree": st.snapshot(self.install), "program": "bin/app.exe",
+                                      "program_version": "1.0.0.0"})
+        self.put_program((2, 0, 0, 0))
+        self.runner_file(2000)
+        self.before = st.snapshot(self.install)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0", self.output.getvalue())
+        self.settled(2000, ["wineboot", *self.SETTINGS])
+
+    def test_the_settings_of_a_changed_folder_are_not_touched(self):
+        self.follows()
+        self.runner_file(2000)
+        (self.install / "program.dll").write_bytes(b"changed")
+        self.events = []
+        self.refused("its install folder changed")
+        self.assertEqual(self.events, [])
 
     def save_runtime_registry(self):
         sections = {r"Software\Wine": {"Version": self.registry["version"]}}
