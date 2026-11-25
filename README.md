@@ -146,7 +146,7 @@ git pull
 ./setup ~/Downloads/<the Capture One installer>.exe
 ```
 
-Setup checks every finished step. If an update of Halation changed a runner step, setup stops and names the folder to remove; remove it and run setup again.
+Setup checks every finished step. When an update of Halation changes a patch or the GE-Proton release, setup builds the new runner beside the one you have and switches over at the end; close Capture One for that. If the build fails, the old runner stays in use.
 
 **When Halation's profile changes**, close Capture One first. Setup applies the difference to the prefix you have: the installer does not run again and the app's files are not touched.
 
@@ -161,7 +161,7 @@ Everything Halation made is in `~/.local/share/halation-layer`, plus the `halati
 ### If something goes wrong
 
 - **`missing required tools: ...`**: install the tools it names (step 2), then run setup again.
-- **`... remove <folder> before retrying`**: delete that folder, then run setup again. Never delete a finished prefix (`pfx`) for this.
+- **`... remove <folder> before retrying`**: a folder no longer matches what setup built in it. Delete that folder, then run setup again. Never delete a finished prefix (`pfx`) for this.
 - **`... was left as it is: ...`**: keep the folder. The text after the colon is the reason, for example that the app is open or an update is not finished. If the app no longer starts, open an issue before removing anything.
 - **`a local installer file is required`**: the path after `./setup` must point to the installer `.exe`.
 - **"Open With plugin could not be enabled"** in Capture One: that plugin needs Microsoft's .NET Framework 4.8; see the [reference](docs/reference.md#optional-the-plugin-runtime).

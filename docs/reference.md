@@ -6,7 +6,8 @@ How each piece of Halation works, for contributors and anyone curious. The front
 
 - **Data folder.** `$XDG_DATA_HOME/halation-layer`, or the local data directory `halation-layer` when that variable is unset; `--data <dir>` selects another location for both commands.
 - **Before starting**, setup checks the required build dependencies. It reports each step's time and skips steps it has already verified.
-- **A partial or changed step** is refused, naming the folder to remove before retrying. A finished prefix never is: setup says why it left it as it is, because it holds the app, its settings and its activation.
+- **A changed step** is refused, naming the folder to remove before retrying. A finished prefix never is: setup says why it left it as it is, because it holds the app, its settings and its activation.
+- **A new runner** replaces the old one in a single setup, see [Renewing the runner](#renewing-the-runner).
 - **Launch** checks the installed files before and after; arguments after `./run --` are passed to the program.
 
 ## Repro programs
@@ -73,6 +74,16 @@ core/runner.py assemble --mode unix --pins core/runner/ge-proton11-12.json --wor
 **Pins.** The pins file names the Wine and wine-staging commits the runner was built from and the runner's own patches for each DLL we rebuild, so the result differs from the runner only by `patches/`.
 
 **Work and output folders.** `build` records the pins and patch contents in its work directory and refuses to reuse it if either changes; use a fresh `--work` directory after editing pins or patches. `assemble` refuses an existing output folder and writes `halation-runner.json` with each replaced DLL's hash before and after.
+
+## Renewing the runner
+
+Setup records what the runner was made from: the GE-Proton release and a hash of the pins, build options and patches. When that differs from today's, or the runner is missing or unfinished, it makes a new set of four folders: `runner-work`, `runners/patched-pe`, `runner-work-unix` and `runners/patched`.
+
+- **Beside the old one.** The set is built in `<data>/rebuild`, so `./run` keeps the old runner until the switch and after any failure before it.
+- **The switch** moves the old folders into `rebuild/old` and the new ones into place, checks them there and deletes `rebuild`. `rebuild/rebuild.json` records it, so a switch that was cut short is finished by the next setup or run. If the check fails, the old folders go back.
+- **What stops it.** Setup waits for nothing: it stops before the switch while a program runs in the prefix, keeps the finished set for the next setup, and never switches to a release older than the one the prefix was last used with. It needs room for a second set, and says how much.
+- **What it never touches.** Only these four folders are moved and only `rebuild` is deleted. A link, or anything that holds a prefix's files, in one of these places is refused. The old GE-Proton download stays.
+- **With unchanged inputs** a folder that no longer matches its record is refused, not rebuilt.
 
 ## Applying a profile
 

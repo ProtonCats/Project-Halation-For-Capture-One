@@ -6,12 +6,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import struct
 import time
 
-from . import prefix, runner, setup as profiles
+from . import prefix, rebuild, runner, setup as profiles
 
 PROJECT_SLUG = "halation-layer"
 REPO = Path(__file__).resolve().parents[1]
@@ -62,6 +63,177 @@ def completed(folder, check):
     return True
 
 
+class RunnerSet:
+    """The folders of one built runner under root: how each is made, how it is checked, and what it was made from."""
+
+    def __init__(self, root, base, pins):
+        self.root, self.base, self.pins = root, base, pins
+        self.patches = runner.our_patches()
+        self.pe_patches = runner.mode_patches(self.patches, "pe")
+        self.unix_patches = runner.mode_patches(self.patches, "unix")
+        self.dlls = {f"{dll}.dll" for _, names in self.pe_patches for dll in names}
+        self.work, self.unix_work = root / "runner-work", root / "runner-work-unix"
+        self.assembled = root / "runners/patched"
+        self.pe_runner = root / "runners/patched-pe" if self.unix_patches else self.assembled
+        if self.unix_patches:
+            runner.unix_pins(pins)
+        self.checked = []
+
+    def inputs(self):
+        contents = PINS.read_bytes()
+        return {"base": self.pins["ge_tag"], "pe": runner.patch_identity(contents, self.pe_patches),
+                "unix": runner.patch_identity(contents, self.unix_patches, "unix") if self.unix_patches else None}
+
+    def recorded(self):
+        """What the finished runner says it was made from; None when there is none, or part of the record is gone."""
+        manifest, marker = self.assembled / "halation-runner.json", self.work / ".patched"
+        if not manifest.is_file() or not marker.is_file():
+            return None
+        pe = marker.read_text().strip()
+        if not re.fullmatch("[0-9a-f]{64}", pe):
+            partial(self.work)
+        try:
+            record = json.loads(manifest.read_bytes())
+            made = {"base": record["base"], "pe": pe, "unix": record["unix"]["identity"] if "unix" in record else None}
+            if not isinstance(made["base"], str) or not (made["unix"] is None or re.fullmatch("[0-9a-f]{64}", made["unix"])):
+                raise ValueError("unexpected content")
+        except (ValueError, KeyError, TypeError):
+            partial(self.assembled)
+        return made
+
+    def current(self):
+        """True when the set is whole and made from today's inputs; a set that only differs from its record is refused."""
+        self.checked = []
+        for folder in (self.work, self.unix_work, self.pe_runner, self.assembled):
+            if folder.is_symlink():
+                partial(folder)
+        if self.recorded() != self.inputs():
+            return False
+        for name, folder, check, _, _ in self.steps():
+            start = time.monotonic()
+            if not completed(folder, check):
+                return False
+            self.checked.append((name, time.monotonic() - start))
+        return True
+
+    def names(self):
+        return [name for name in rebuild.NAMES if os.path.lexists(self.root / name)]
+
+    def built(self):
+        if (self.work / ".patched").read_text().strip() != runner.patch_identity(PINS.read_bytes(), self.pe_patches):
+            return False
+        for dll in self.dlls:
+            runner.import_names(self.work / "out" / dll)
+        return bool(self.dlls)
+
+    def assembled_ok(self):
+        manifest = json.loads((self.pe_runner / "halation-runner.json").read_bytes())
+        if manifest["base"] != self.pins["ge_tag"] or manifest["patches"] != [p.name for p, _ in self.pe_patches]:
+            return False
+        if set(manifest["dlls"]) != self.dlls or prefix.runner_version(self.pe_runner) != prefix.runner_version(self.base):
+            return False
+        return all(item == {"sha256": runner.sha256(self.pe_runner / LIB / dll),
+                            "replaces": runner.sha256(self.base / LIB / dll)}
+                   and item["sha256"] == runner.sha256(self.work / "out" / dll)
+                   for dll, item in manifest["dlls"].items())
+
+    def unix_built(self):
+        runner.verified_unix(PINS, self.unix_work, self.pe_runner)
+        return True
+
+    def unix_assembled(self):
+        _, _, record = runner.verified_unix(PINS, self.unix_work, self.pe_runner)
+        manifest = json.loads((self.assembled / "halation-runner.json").read_bytes())
+        pe_manifest = json.loads((self.pe_runner / "halation-runner.json").read_bytes())
+        if manifest["base"] != self.pins["ge_tag"] or manifest["dlls"] != pe_manifest["dlls"] \
+                or manifest["patches"] != sorted(p.name for p, _ in self.patches) \
+                or prefix.runner_version(self.assembled) != prefix.runner_version(self.base):
+            return False
+        if not all(runner.sha256(self.assembled / LIB / dll) == runner.sha256(self.pe_runner / LIB / dll) for dll in self.dlls):
+            return False
+        files = {relative: {"sha256": record["artifacts"][name], "replaces": runner.sha256(self.pe_runner / relative)}
+                 for name, relative in runner.UNIX_FILES.items()}
+        script = runner.allow_opencl((self.pe_runner / "proton").read_text()).encode()
+        proton = {"sha256": hashlib.sha256(script).hexdigest(), "replaces": runner.sha256(self.pe_runner / "proton")}
+        return manifest["unix"] == {**record, "files": files, "proton": proton} and all(
+            runner.sha256(self.assembled / relative) == item["sha256"] for relative, item in files.items()) \
+            and runner.sha256(self.assembled / "proton") == proton["sha256"]
+
+    def steps(self):
+        steps = [
+            ("build", self.work, self.built, runner.main, ["build", "--pins", str(PINS), "--work", str(self.work)]),
+            ("assemble", self.pe_runner, self.assembled_ok, runner.main,
+             ["assemble", "--pins", str(PINS), "--work", str(self.work), "--base", str(self.base), "--out", str(self.pe_runner)]),
+        ]
+        if self.unix_patches:
+            steps.extend([
+                ("build-unix", self.unix_work, self.unix_built, runner.main,
+                 ["build", "--mode", "unix", "--pins", str(PINS), "--work", str(self.unix_work), "--base", str(self.pe_runner)]),
+                ("assemble-unix", self.assembled, self.unix_assembled, runner.main,
+                 ["assemble", "--mode", "unix", "--pins", str(PINS), "--work", str(self.unix_work),
+                  "--base", str(self.pe_runner), "--out", str(self.assembled)]),
+            ])
+        return steps
+
+
+def run_steps(steps, staged=False):
+    """Take each step that its check does not find complete. A staged step that fails leaves the runner in use alone."""
+    for name, folder, check, action, command in steps:
+        start = time.monotonic()
+        try:
+            skipped = completed(folder, check)
+            if not skipped:
+                code = action(command)
+                finished = os.path.lexists(folder / profiles.MARKER)
+                if code:
+                    advice = "; the runner in use is unchanged, run setup again" if staged else \
+                        "" if finished else f"; remove {folder} before retrying"
+                    raise ValueError(f"{name} failed with exit {code}{advice}")
+                if not completed(folder, check):
+                    if finished:
+                        raise ValueError(f"{folder} changed again while setup ran; run setup again")
+                    partial(folder)
+        except BaseException:
+            print(f"{name}: failed ({time.monotonic() - start:.1f}s)", file=sys.stderr)
+            raise
+        print(f"{name}: {'verified, skipped' if skipped else 'complete'} ({time.monotonic() - start:.1f}s)", flush=True)
+
+
+def renew(data, live, pfx):
+    """Build today's runner beside the one in use and put it in its place."""
+    stamp, name = prefix.runner_version(live.base)
+    if os.path.lexists(pfx / profiles.MARKER) and not prefix.forward_ok(pfx, stamp):
+        last = prefix.runner_history(pfx)["runner"]
+        raise ValueError(f"{pfx} was last used by {last}, newer than {name}; the runner in use is unchanged, update Halation")
+    staged, journal = RunnerSet(data / rebuild.STAGING, live.base, live.pins), rebuild.state(data)
+    if not (journal and journal["state"] == "ready" and journal["inputs"] == live.inputs() and whole(staged)):
+        rebuild.discard(data)
+        rebuild.check_space(data)
+        rebuild.begin(data, live.inputs())
+        run_steps(staged.steps(), staged=True)
+        rebuild.ready(data, staged.names())
+    process = prefix.in_use(pfx)
+    if process:
+        raise ValueError(f"the new runner is ready, but a program still runs in the prefix ({process}); close the app and run setup again")
+    start = time.monotonic()
+    rebuild.switch(data)
+    try:
+        if not live.current():
+            raise ValueError("it is not whole")
+    except (OSError, ValueError, KeyError, TypeError, SystemExit) as error:
+        rebuild.undo(data)
+        raise ValueError(f"the new runner did not pass its check in place ({error}); the one before it is back") from None
+    rebuild.discard(data)
+    print(f"switch: complete ({time.monotonic() - start:.1f}s)", flush=True)
+
+
+def whole(staged):
+    try:
+        return staged.current()
+    except (OSError, ValueError, KeyError, TypeError, SystemExit):
+        return False
+
+
 def setup_main(argv=None):
     parser = argparse.ArgumentParser(description="Prepare the pinned runner and apply the profile")
     parser.add_argument("installer")
@@ -83,109 +255,31 @@ def setup_main(argv=None):
         pins = json.loads(PINS.read_bytes())
         raw = PROFILE.read_bytes()
         profile, digest = profiles.load_profile(raw), hashlib.sha256(raw).hexdigest()
-        base = data / "runners" / pins.get("ge_asset", pins["ge_tag"])
-        work, assembled, pfx = data / "runner-work", data / "runners/patched", data / "pfx"
-        patches = runner.our_patches()
-        pe_patches = runner.mode_patches(patches, "pe")
-        unix_patches = runner.mode_patches(patches, "unix")
-        dlls = {f"{dll}.dll" for _, names in pe_patches for dll in names}
-        pe_runner = data / "runners/patched-pe" if unix_patches else assembled
-        unix_work = data / "runner-work-unix"
-        if unix_patches:
-            runner.unix_pins(pins)
+        base, pfx = data / "runners" / pins.get("ge_asset", pins["ge_tag"]), data / "pfx"
 
         def fetched():
             return prefix.runner_version(base)[1] == pins["ge_tag"]
 
-        def built():
-            if (work / ".patched").read_text().strip() != runner.patch_identity(PINS.read_bytes(), pe_patches):
-                return False
-            for dll in dlls:
-                runner.import_names(work / "out" / dll)
-            return bool(dlls)
-
-        def assembled_ok():
-            manifest = json.loads((pe_runner / "halation-runner.json").read_bytes())
-            if manifest["base"] != pins["ge_tag"] or manifest["patches"] != [p.name for p, _ in pe_patches]:
-                return False
-            if set(manifest["dlls"]) != dlls or prefix.runner_version(pe_runner) != prefix.runner_version(base):
-                return False
-            return all(item == {"sha256": runner.sha256(pe_runner / LIB / dll),
-                                "replaces": runner.sha256(base / LIB / dll)}
-                       and item["sha256"] == runner.sha256(work / "out" / dll)
-                       for dll, item in manifest["dlls"].items())
-
-        def unix_built():
-            runner.verified_unix(PINS, unix_work, pe_runner)
-            return True
-
-        def unix_assembled():
-            _, _, record = runner.verified_unix(PINS, unix_work, pe_runner)
-            manifest = json.loads((assembled / "halation-runner.json").read_bytes())
-            pe_manifest = json.loads((pe_runner / "halation-runner.json").read_bytes())
-            if manifest["base"] != pins["ge_tag"] or manifest["dlls"] != pe_manifest["dlls"] \
-                    or manifest["patches"] != sorted(p.name for p, _ in patches) \
-                    or prefix.runner_version(assembled) != prefix.runner_version(base):
-                return False
-            if not all(runner.sha256(assembled / LIB / dll) == runner.sha256(pe_runner / LIB / dll) for dll in dlls):
-                return False
-            files = {relative: {"sha256": record["artifacts"][name], "replaces": runner.sha256(pe_runner / relative)}
-                     for name, relative in runner.UNIX_FILES.items()}
-            script = runner.allow_opencl((pe_runner / "proton").read_text()).encode()
-            proton = {"sha256": hashlib.sha256(script).hexdigest(), "replaces": runner.sha256(pe_runner / "proton")}
-            return manifest["unix"] == {**record, "files": files, "proton": proton} and all(
-                runner.sha256(assembled / relative) == item["sha256"] for relative, item in files.items()) \
-                and runner.sha256(assembled / "proton") == proton["sha256"]
-
         def applied():
             if not os.path.lexists(pfx / profiles.MARKER):
                 return False
-            if profiles.examine(pfx, profile, digest, assembled).outdated:
+            if profiles.examine(pfx, profile, digest, live.assembled).outdated:
                 raise Outdated
             return True
 
-        steps = [
-            ("fetch", base, fetched, runner.main, ["fetch", "--pins", str(PINS), "--dest", str(base.parent)]),
-            ("build", work, built, runner.main, ["build", "--pins", str(PINS), "--work", str(work)]),
-            ("assemble", pe_runner, assembled_ok, runner.main,
-             ["assemble", "--pins", str(PINS), "--work", str(work), "--base", str(base), "--out", str(pe_runner)]),
-        ]
-        if unix_patches:
-            steps.extend([
-                ("build-unix", unix_work, unix_built, runner.main,
-                 ["build", "--mode", "unix", "--pins", str(PINS), "--work", str(unix_work), "--base", str(pe_runner)]),
-                ("assemble-unix", assembled, unix_assembled, runner.main,
-                 ["assemble", "--mode", "unix", "--pins", str(PINS), "--work", str(unix_work),
-                  "--base", str(pe_runner), "--out", str(assembled)]),
-            ])
-        steps.extend([
-            ("prefix", pfx, applied, profiles.main,
-             ["apply", "--profile", str(PROFILE), "--runner", str(assembled), "--prefix", str(pfx),
-              "--installer", str(installer)]),
-        ])
-        checked = {}
-        for index, (name, folder, check, action, command) in enumerate(steps):
-            checked[index] = completed(folder, check)
-            if not checked[index]:
-                break
-        for index, (name, folder, check, action, command) in enumerate(steps):
-            start = time.monotonic()
-            try:
-                skipped = checked[index] if index in checked else completed(folder, check)
-                if not skipped:
-                    code = action(command)
-                    finished = os.path.lexists(folder / profiles.MARKER)
-                    if code:
-                        advice = "" if finished else f"; remove {folder} before retrying"
-                        raise ValueError(f"{name} failed with exit {code}{advice}")
-                    if not completed(folder, check):
-                        if finished:
-                            raise ValueError(f"{folder} changed again while setup ran; run setup again")
-                        partial(folder)
-            except BaseException:
-                print(f"{name}: failed ({time.monotonic() - start:.1f}s)", file=sys.stderr)
-                raise
-            print(f"{name}: {'verified, skipped' if skipped else 'complete'} ({time.monotonic() - start:.1f}s)", flush=True)
+        live = RunnerSet(data, base, pins)
+        with rebuild.lock(data):
+            rebuild.recover(data)
+            run_steps([("fetch", base, fetched, runner.main, ["fetch", "--pins", str(PINS), "--dest", str(base.parent)])])
+            if live.current():
+                for name, seconds in live.checked:
+                    print(f"{name}: verified, skipped ({seconds:.1f}s)", flush=True)
+                rebuild.discard(data)
+            else:
+                renew(data, live, pfx)
+            run_steps([("prefix", pfx, applied, profiles.main,
+                        ["apply", "--profile", str(PROFILE), "--runner", str(live.assembled), "--prefix", str(pfx),
+                         "--installer", str(installer)])])
         return 0
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"setup: {exc}", file=sys.stderr)
@@ -221,6 +315,9 @@ def run_main(argv=None):
     try:
         data = data_directory(args.data)
         profile = profiles.load_profile(PROFILE.read_bytes())
+        if not (data / "runners/patched").is_dir() and os.path.lexists(data / rebuild.STAGING):
+            with rebuild.lock(data):  # setup was stopped in the middle of a switch
+                rebuild.recover(data)
         program = executable(data / "pfx", profile)
         vendors = opencl_vendors(data)
         if vendors is None:

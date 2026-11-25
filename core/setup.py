@@ -207,11 +207,16 @@ def write_marker(prefix, record):
     if marker.is_file() and not marker.is_symlink():
         replace_file(prefix / PREVIOUS, marker.read_bytes())
     replace_file(marker, (json.dumps(record) + "\n").encode())
-    folder = os.open(prefix, os.O_RDONLY | os.O_DIRECTORY)
+    sync(prefix)
+
+
+def sync(folder):
+    """Flush a folder, so that a file replaced in it stays replaced."""
+    handle = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        os.fsync(folder)
+        os.fsync(handle)
     finally:
-        os.close(folder)
+        os.close(handle)
 
 
 def read_marker(prefix):
