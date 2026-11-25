@@ -31,6 +31,7 @@ class OurPatches(unittest.TestCase):
         self.assertEqual(mapping["0003"], ["shell32"])
         self.assertEqual(mapping["0004"], ["shell32"])
         self.assertEqual(mapping["0012"], ["wined3d"])
+        self.assertEqual(mapping["0013"], ["win32u"])
 
     def test_every_patched_dll_has_base_patches_in_each_pins_file(self):
         dlls = {d for _, ds in runner.mode_patches(runner.our_patches(), "pe") for d in ds}
@@ -655,7 +656,7 @@ class UnixMode(Sandbox):
         self.base, self.work, self.out = (self.root / p for p in ("base", "work", "assembled"))
         self.base.mkdir()
         self.work.mkdir()
-        self.files = {**runner.UNIX_FILES, "win32u.so": "files/lib/wine/x86_64-unix/win32u.so"}
+        self.files = dict(runner.UNIX_FILES)
         for name, relative in self.files.items():
             path = self.base / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -682,6 +683,7 @@ class UnixMode(Sandbox):
             path.write_bytes(("built " + name).encode())
         self.built_version = 111
         self.base_version = 111
+        self.win32u_version = 111
         self.wayland_version = 111
         self.commands = []
         def command(cmd, **kwargs):
@@ -706,7 +708,8 @@ class UnixMode(Sandbox):
                                                    f"  2:\t{call}\n  3:\t{load}\n  4:\t{call}\n")
             base = "__wine_set_user_driver" in cmd[3]
             symbol = "__wine_set_user_driver" if base else "init_user_driver"
-            instruction, value = ("cmp", self.base_version) if base else ("mov", self.built_version)
+            checked = self.base_version if cmd[4].startswith(str(self.base)) else self.win32u_version
+            instruction, value = ("cmp", checked) if base else ("mov", self.built_version)
             return subprocess.CompletedProcess(cmd, 0, stdout=f"00000001 <{symbol}>:\n  1: {instruction} $0x{value:x},%esi\n")
         self.decode = self.enterContext(patch.object(runner.subprocess, "run", side_effect=disassemble))
 
@@ -726,7 +729,25 @@ class UnixMode(Sandbox):
         for name, relative in runner.UNIX_FILES.items():
             self.assertEqual((self.out / relative).read_bytes(), ("built " + name).encode())
             self.assertEqual((self.base / relative).read_bytes(), ("original " + name).encode())
-        self.assertEqual((self.out / self.files["win32u.so"]).read_bytes(), b"original win32u.so")
+        self.assertEqual((self.out / "files/lib/wine/x86_64-unix/win32u.so").read_bytes(), b"built win32u.so")
+
+    def test_a_win32u_that_lost_a_library_is_refused(self):
+        base, built = self.base / runner.UNIX_FILES["win32u.so"], self.work / "build64" / runner.UNIX_TARGETS["win32u.so"]
+        for names, refused in ((b"libfreetype.so.6\0libfontconfig.so.1\0", False), (b"libfreetype.so.6\0", True),
+                               (b"libfontconfig.so.1\0libfreetype.so.6\0libEGL.so.1\0", False)):
+            with self.subTest(names=names):
+                built.write_bytes(b"built win32u.so " + names)
+                base.write_bytes(b"original win32u.so libfontconfig.so.1\0libfreetype.so.6\0")
+                self.pins["unix"]["base_sha256"][runner.UNIX_FILES["win32u.so"]] = runner.sha256(base)
+                self.pins_path.write_text(json.dumps(self.pins))
+                for left in (self.work / ".patched", self.work / "unix-build.json"):
+                    left.unlink(missing_ok=True)
+                if refused:
+                    with self.assertRaisesRegex(SystemExit, "win32u.so was built without libfontconfig.so.1$"):
+                        runner.build(self.args)
+                    self.assertFalse((self.work / "unix-build.json").exists())
+                else:
+                    self.assertEqual(runner.build(self.args), 0)
 
     def test_opencl_built_without_the_host_loader_is_refused(self):
         self.opencl_imports = False
@@ -766,15 +787,17 @@ class UnixMode(Sandbox):
     def test_version_mismatch_refuses_assembly_without_any_writes(self):
         self.built()
         original = self.header.read_text()
-        for change in ("header", "built", "wayland", "base"):
+        for change in ("header", "built", "wayland", "base", "win32u"):
             self.header.write_text(original)
-            self.built_version = self.base_version = self.wayland_version = 111
+            self.built_version = self.base_version = self.wayland_version = self.win32u_version = 111
             if change == "header":
                 self.header.write_text("#define WINE_GDI_DRIVER_VERSION 108\n")
             elif change == "built":
                 self.built_version = 108
             elif change == "wayland":
                 self.wayland_version = 108
+            elif change == "win32u":
+                self.win32u_version = 108
             else:
                 self.base_version = 108
             self.run.reset_mock()
