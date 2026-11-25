@@ -87,7 +87,9 @@ The measured profile is `profiles/captureone/profile.json`; its setting notes ar
 - **Registry directives** are limited to `HKCU\Software\Wine\` and `HKCU\Software\Microsoft\Avalon.Graphics` and its subkeys; authentication and licensing directives are refused.
 - **The install folder** is checked before and after every Windows step, and a change fails it. Only the initial installer may create an absent install folder.
 - **A failed installer** with the install folder still absent is retried once after 10 seconds with the same arguments; each attempt reports its exit code and duration. A second failure or a partial install refuses completion and asks for the prefix folder to be removed before running setup again.
-- **The record.** Setup then records its tree and the profile hash in `.setup.json`. Applying the same profile again changes nothing, and a different profile requires a fresh prefix.
+- **The record.** Setup then records its tree and the profile hash in `.setup.json`. Applying the same profile again changes nothing.
+- **A changed profile** is applied to the existing prefix: registry values, overrides, the Windows version and prerequisites that were not there before. The app's installer does not run again, and a value is removed by naming it with `null`. A profile that moves `install_dir` needs a fresh prefix.
+- **An app that updated itself** is recognised by its own version number. Setup prints the old and new version and records the new folder. A folder that changed while the version stayed the same is refused.
 
 ## Prefix and launch
 
@@ -106,7 +108,7 @@ Profile launches also watch `install_dir`, resolved inside the prefix, before an
 
 `./run --display wayland` (or `core/prefix.py run --display wayland`) opts into the Wayland driver; this was measured on the window probe only, not yet on the application. The default remains X11.
 
-`./run --display wayland --renderer wined3d` selects Wine's own Direct3D for WPF. Application rendering through `./run` remains untested; the measured run used the lab harness.
+`./run --display wayland --renderer wined3d` selects Wine's own Direct3D. It reaches WPF only when the prefix lets WPF use the GPU; the Capture One profile draws WPF in software (`DisableHWAcceleration=1`). Application rendering through `./run` remains untested; the measured run used the lab harness.
 
 ## Optional: the plugin runtime
 

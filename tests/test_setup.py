@@ -440,6 +440,30 @@ class Setup(unittest.TestCase):
         self.assertEqual(self.events, [])
         self.assertIn("nothing changed", self.output.getvalue())
 
+    def test_each_kind_of_prefix_setting_is_applied_on_its_own(self):
+        self.assertEqual(self.apply(), 0)
+        def version():
+            self.profile["windows_version"] = "win11"
+        def override():
+            self.profile["dll_overrides"]["graphics"] = "native"
+        def value():
+            self.profile["registry"][0]["data"] = 0
+        wanted = ((version, ("version",), "win11"), (override, ("HKCU\\Software\\Wine\\DllOverrides", "graphics"), "native"),
+                  (value, ("HKCU\\Software\\Microsoft\\Avalon.Graphics", "DisableHWAcceleration"), "0"))
+        for change, key, expected in wanted:
+            with self.subTest(change=change.__name__):
+                change()
+                self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+                self.assertEqual(self.registry[key if len(key) == 2 else key[0]], expected)
+
+    def test_a_prerequisite_changed_after_its_check_never_runs(self):
+        bad = self.root / "runtime.exe"
+        bad.write_bytes(b"swapped")
+        with patch.object(st, "prerequisites", return_value=[bad]), self.assertRaisesRegex(SystemExit, "checksum mismatch"):
+            self.apply()
+        self.assertNotIn("prerequisite", self.events)
+        self.assertFalse(bad.exists())
+
     def test_a_value_named_null_is_removed_in_place(self):
         self.assertEqual(self.apply(), 0)
         self.profile["registry"][0]["data"] = None
