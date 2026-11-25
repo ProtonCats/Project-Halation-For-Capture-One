@@ -6,6 +6,7 @@ import io
 import fcntl
 import json
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from core import treehash
-from test_peversion import pe
+from tests.test_peversion import pe
 
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("prefix", REPO / "core/prefix.py")
@@ -386,27 +387,93 @@ class Prefix(unittest.TestCase):
                 self.assertEqual(exc.exception.code, 3)
                 self.assertIn("changed program.dll sha256", self.stderr.getvalue())
 
+    def run_with_change(self, change, program="app.exe", before=(1, 9, 0, 0)):
+        """A run during which change(install) happens; its exit code, or the code it stopped with."""
+        if not getattr(self.args, "profile", None):
+            self.install = self.watched_profile()
+        install, profile = self.install, Path(self.args.profile)
+        profile.write_text(json.dumps({**json.loads(profile.read_text()), "program": program}))
+        (install / "app.exe").unlink(missing_ok=True)
+        (install / "app.exe").write_bytes(pe(before))
+        (install / "program.dll").write_bytes(b"original")
+        self.stderr.truncate(0)
+        self.stderr.seek(0)
+        def execute(cmd, **kwargs):
+            if cmd[0] != "umu-run":
+                return self.hash_command(cmd)
+            change(install)
+            return subprocess.CompletedProcess(cmd, 7)
+        self.command.side_effect = execute
+        try:
+            return px.run(self.args)
+        except SystemExit as stop:
+            return stop.code
+
     def test_an_update_during_the_run_is_reported_and_keeps_the_exit_code(self):
-        install = self.watched_profile()
-        profile = Path(self.args.profile)
-        profile.write_text(json.dumps({**json.loads(profile.read_text()), "program": "app.exe"}))
-        for after, code in (((2, 0, 0, 0), 7), ((1, 0, 0, 0), None)):
-            with self.subTest(after=after):
-                (install / "app.exe").write_bytes(pe((1, 0, 0, 0)))
-                self.stderr.truncate(0)
-                def program(cmd, **kwargs):
-                    if cmd[0] != "umu-run":
-                        return self.hash_command(cmd)
-                    (install / "app.exe").write_bytes(pe(after, extra=b"x"))
-                    return subprocess.CompletedProcess(cmd, 7)
-                self.command.side_effect = program
-                if code is None:
-                    with self.assertRaises(SystemExit) as exc:
-                        px.run(self.args)
-                    self.assertEqual(exc.exception.code, 3)
-                else:
-                    self.assertEqual(px.run(self.args), code)
-                    self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0", self.stderr.getvalue())
+        def update(install):
+            (install / "app.exe").write_bytes(pe((1, 10, 0, 0)))
+            (install / "added.dll").write_bytes(b"new")
+        self.assertEqual(self.run_with_change(update), 7)
+        self.assertIn("the app updated itself: 1.9.0.0 to 1.10.0.0", self.stderr.getvalue())
+        for path in ("added added.dll", "changed app.exe sha256"):
+            self.assertIn(path, self.stderr.getvalue())
+
+    def test_any_other_change_during_the_run_fails_it(self):
+        outside = self.root / "outside.exe"
+        def link(install):
+            (install / "app.exe").unlink()
+            (install / "app.exe").symlink_to(outside)
+        def other(install):
+            (install / "program.dll").write_bytes(b"changed")
+            outside.write_bytes(pe((9, 0, 0, 0)))
+        changes = {"same version": lambda i: (i / "app.exe").write_bytes(pe((1, 9, 0, 0), extra=b"x")),
+                   "lower version": lambda i: (i / "app.exe").write_bytes(pe((1, 8, 0, 0))),
+                   "no version": lambda i: (i / "app.exe").write_bytes(b"MZ"),
+                   "gone": lambda i: (i / "app.exe").unlink(), "link": link}
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                outside.write_bytes(pe((9, 0, 0, 0)))
+                self.assertEqual(self.run_with_change(change), 3)
+                self.assertNotIn("updated itself", self.stderr.getvalue())
+        for program in ("../outside.exe", str(outside)):
+            with self.subTest(program=program):
+                outside.write_bytes(pe((1, 0, 0, 0)))
+                self.assertEqual(self.run_with_change(other, program), 3)
+
+    def fake_process(self, proc, pid, parent, comm=b"app.exe", **environment):
+        folder = proc / str(pid)
+        folder.mkdir(parents=True)
+        (folder / "stat").write_bytes(b"%d (%s) S %d 1 1" % (pid, comm, parent))
+        (folder / "comm").write_bytes(comm + b"\n")
+        (folder / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in environment.items()) + b"\0")
+
+    def test_a_process_of_the_prefix_is_found_by_its_environment(self):
+        (self.prefix / "pfx").symlink_to(".")
+        other = self.root / "prefix2"
+        other.mkdir()
+        mine, shell = px.os.getpid(), 10
+        cases = [({"WINEPREFIX": f"{self.prefix}/pfx/"}, True), ({"STEAM_COMPAT_DATA_PATH": str(self.prefix)}, True),
+                 ({"WINEPREFIX": str(self.prefix)}, True), ({"WINEPREFIX": str(other)}, False), ({"WINEPREFIX": ""}, False),
+                 ({"OTHER": str(self.prefix)}, False), ({"WINEPREFIX": "prefix"}, False), ({}, False)]
+        for number, (environment, found) in enumerate(cases):
+            with self.subTest(environment=environment):
+                proc = self.root / f"proc{number}"
+                self.fake_process(proc, mine, shell, WINEPREFIX=str(self.prefix))
+                self.fake_process(proc, shell, 1, comm=b"a) shell", WINEPREFIX=str(self.prefix))
+                self.fake_process(proc, 999, 1, **environment)
+                (proc / "1234/environ").mkdir(parents=True)
+                (proc / "version").write_text("not a process")
+                self.assertEqual(px.in_use(self.prefix, proc), "app.exe, process 999" if found else None)
+        with patch.object(px.os, "getuid", return_value=px.os.getuid() + 1):
+            self.assertIsNone(px.in_use(self.prefix, self.root / "proc0"))
+
+    def test_a_real_process_of_the_prefix_is_found(self):
+        self.assertIsNone(px.in_use(self.prefix))
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                 env={**px.os.environ, "WINEPREFIX": str(self.prefix)})
+        self.addCleanup(child.wait, 10)
+        self.addCleanup(child.stdin.close)
+        self.assertIn(f"process {child.pid}", px.in_use(self.prefix) or "")
 
     def test_an_explicit_watch_never_accepts_an_update(self):
         install = self.watched_profile()

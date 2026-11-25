@@ -133,6 +133,37 @@ def validate_environment(values):
     return values
 
 
+def in_use(prefix, proc=Path("/proc")):
+    """A process of this user that runs in prefix, as "name, process number", or None.
+
+    umu and Proton put the prefix in the environment of everything they start. This process and its parents do not
+    count: a shell that exports WINEPREFIX is not the app.
+    """
+    target, parents, pid = os.path.realpath(prefix), set(), os.getpid()
+    while pid > 0 and pid not in parents:
+        parents.add(pid)
+        try:
+            pid = int((proc / str(pid) / "stat").read_bytes().rpartition(b")")[2].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    for folder in proc.iterdir():
+        if not folder.name.isdigit() or int(folder.name) in parents:
+            continue
+        try:
+            if folder.stat().st_uid != os.getuid():
+                continue
+            environment = (folder / "environ").read_bytes().split(b"\0")
+            name = (folder / "comm").read_text(errors="replace").strip()
+        except OSError:  # ended meanwhile, or not ours to read
+            continue
+        for item in environment:
+            key, _, value = item.partition(b"=")
+            if key in (b"WINEPREFIX", b"STEAM_COMPAT_DATA_PATH") and value.startswith(b"/") \
+                    and os.path.realpath(os.fsdecode(value)) == target:
+                return f"{name}, process {folder.name}"
+    return None
+
+
 def checked_version(runner, prefix):
     stamp, name = runner_version(runner)
     if not forward_ok(prefix, stamp):
@@ -194,8 +225,7 @@ def run(a):
                 if path == prefix or not path.is_relative_to(prefix):
                     raise ValueError("install_dir must stay inside the prefix")
                 watch = str(path)
-                if isinstance(profile.get("program"), str):
-                    program = path / profile["program"]
+                program = profile.get("program") if isinstance(profile.get("program"), str) else None
         except (OSError, ValueError, TypeError) as ex:
             die(f"invalid launch profile: {ex}")
     record_runner(prefix, stamp, name)
@@ -205,7 +235,7 @@ def run(a):
         env["PROTON_ENABLE_WAYLAND"] = "1"
     if getattr(a, "opencl_vendors", None):
         env.setdefault("OCL_ICD_VENDORS", a.opencl_vendors)
-    version = peversion.file_version(program) if program else None
+    version = peversion.program_version(watch, program)[0] if program else None
     with tempfile.TemporaryDirectory() as tmp:
         manifest = Path(tmp) / "tree.json"
         if watch:
@@ -218,12 +248,13 @@ def run(a):
             if watch:
                 cmp = subprocess.run([sys.executable, str(HERE / "treehash.py"), "compare", watch, str(manifest)],
                                      capture_output=True, text=True)
-                now = peversion.file_version(program) if program and cmp.returncode == 1 else None
-                if version and now and version != now:
-                    print(f"the app updated itself: {version} to {now} ({len(cmp.stdout.splitlines())} changes); "
-                          "the next setup records its folder", file=sys.stderr)
-                elif cmp.returncode:
+                now = peversion.program_version(watch, program)[0] if program and cmp.returncode == 1 else None
+                if cmp.returncode:
                     print(cmp.stdout, end="", file=sys.stderr)
+                if version and now and peversion.parts(now) > peversion.parts(version):
+                    print(f"the app updated itself: {version} to {now} ({len(cmp.stdout.splitlines())} changes, listed above); "
+                          "the next setup checks its folder and records it", file=sys.stderr)
+                elif cmp.returncode:
                     die(f"{watch} changed during the run", 3)
     return code
 

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from core import setup as st
 
-from test_peversion import pe
+from tests.test_peversion import pe
 
 REPO = Path(__file__).resolve().parents[1]
 

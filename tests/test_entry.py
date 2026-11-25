@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from core import entry as en
-from test_peversion import pe
+from tests.test_peversion import pe
 
 
 class Entry(unittest.TestCase):

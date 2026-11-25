@@ -182,10 +182,7 @@ def write_marker(prefix, record):
 
 
 def program_version(install, relative):
-    path = install / relative
-    if path.is_symlink() or not path.resolve().is_relative_to(install.resolve()):
-        return None
-    return peversion.file_version(path)
+    return peversion.program_version(install, relative)[0]
 
 
 def accept_update(prefix, record, relative):
