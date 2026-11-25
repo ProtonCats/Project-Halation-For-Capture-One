@@ -79,10 +79,11 @@ core/runner.py assemble --mode unix --pins core/runner/ge-proton11-12.json --wor
 
 Setup records what the runner was made from: the GE-Proton release and a hash of the pins, build options and patches. When that differs from today's, or the runner is missing or unfinished, it makes a new set of four folders: `runner-work`, `runners/patched-pe`, `runner-work-unix` and `runners/patched`.
 
-- **Beside the old one.** The set is built in `<data>/rebuild`, so `./run` keeps the old runner until the switch and after any failure before it.
+- **Beside the old one.** The set is built in `<data>/rebuild`, so `./run` keeps the old runner until the switch and after any failure before it. The Wine sources are downloaded again for it.
+- **A failed step** leaves `rebuild` as it is. The next setup with the same inputs keeps the steps that pass their check and takes the others again; with other inputs it starts over.
 - **The switch** moves the old folders into `rebuild/old` and the new ones into place, checks them there and deletes `rebuild`. `rebuild/rebuild.json` records it, so a switch that was cut short is finished by the next setup or run. If the check fails, the old folders go back.
-- **What stops it.** Setup waits for nothing: it stops before the switch while a program runs in the prefix, keeps the finished set for the next setup, and never switches to a release older than the one the prefix was last used with. It needs room for a second set, and says how much.
-- **What it never touches.** Only these four folders are moved and only `rebuild` is deleted. A link, or anything that holds a prefix's files, in one of these places is refused. The old GE-Proton download stays.
+- **What stops it.** Before the switch, setup stops while a program runs in the prefix and keeps the finished set for the next setup. It never builds a release older than the one the prefix was last used with. It needs room for a second set, and says how much.
+- **What it never touches.** Only these four folders are moved, and nothing outside `rebuild` is deleted. A link, or anything that holds a prefix's files, in one of these places is refused. The old GE-Proton download stays; setup names it once.
 - **With unchanged inputs** a folder that no longer matches its record is refused, not rebuilt.
 
 ## Applying a profile

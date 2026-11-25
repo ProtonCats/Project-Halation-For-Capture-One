@@ -104,9 +104,6 @@ class RunnerSet:
     def current(self):
         """True when the set is whole and made from today's inputs; a set that only differs from its record is refused."""
         self.checked = []
-        for folder in (self.work, self.unix_work, self.pe_runner, self.assembled):
-            if folder.is_symlink():
-                partial(folder)
         if self.recorded() != self.inputs():
             return False
         for name, folder, check, _, _ in self.steps():
@@ -176,19 +173,30 @@ class RunnerSet:
         return steps
 
 
-def run_steps(steps, staged=False):
-    """Take each step that its check does not find complete. A staged step that fails leaves the runner in use alone."""
+def run_steps(steps, clear=None, advice=None):
+    """Take each step that its check does not find complete.
+
+    clear deletes an unfinished folder of a staged set, so that its step can be taken again; advice ends what is said
+    when that fails. Without them an unfinished folder stops setup.
+    """
     for name, folder, check, action, command in steps:
         start = time.monotonic()
         try:
-            skipped = completed(folder, check)
+            try:
+                skipped = completed(folder, check)
+            except ValueError:
+                if not clear:
+                    raise
+                clear(folder)
+                skipped = False
             if not skipped:
                 code = action(command)
                 finished = os.path.lexists(folder / profiles.MARKER)
                 if code:
-                    advice = "; the runner in use is unchanged, run setup again" if staged else \
-                        "" if finished else f"; remove {folder} before retrying"
-                    raise ValueError(f"{name} failed with exit {code}{advice}")
+                    end = f"; {advice}" if advice else "" if finished else f"; remove {folder} before retrying"
+                    raise ValueError(f"{name} failed with exit {code}{end}")
+                if clear and not whole(folder, check):
+                    raise ValueError(f"{name} did not pass its check; {advice}")
                 if not completed(folder, check):
                     if finished:
                         raise ValueError(f"{folder} changed again while setup ran; run setup again")
@@ -199,19 +207,32 @@ def run_steps(steps, staged=False):
         print(f"{name}: {'verified, skipped' if skipped else 'complete'} ({time.monotonic() - start:.1f}s)", flush=True)
 
 
+def whole(folder, check):
+    try:
+        return completed(folder, check)
+    except ValueError:
+        return False
+
+
 def renew(data, live, pfx):
     """Build today's runner beside the one in use and put it in its place."""
-    stamp, name = prefix.runner_version(live.base)
+    rebuild.check_folders(data)
+    before, (stamp, name) = live.recorded(), prefix.runner_version(live.base)
     if os.path.lexists(pfx / profiles.MARKER) and not prefix.forward_ok(pfx, stamp):
         last = prefix.runner_history(pfx)["runner"]
         raise ValueError(f"{pfx} was last used by {last}, newer than {name}; the runner in use is unchanged, update Halation")
     staged, journal = RunnerSet(data / rebuild.STAGING, live.base, live.pins), rebuild.state(data)
-    if not (journal and journal["state"] == "ready" and journal["inputs"] == live.inputs() and whole(staged)):
+    resumed = journal and journal["state"] in ("building", "ready") and journal["inputs"] == live.inputs()
+    if not resumed:
         rebuild.discard(data)
-        rebuild.check_space(data)
+    rebuild.check_space(data)
+    if resumed:
+        rebuild.resume(data)
+    else:
         rebuild.begin(data, live.inputs())
-        run_steps(staged.steps(), staged=True)
-        rebuild.ready(data, staged.names())
+    run_steps(staged.steps(), lambda folder: rebuild.clear(data, str(folder.relative_to(staged.root))),
+              "the runner in use is unchanged, run setup again" if live.assembled.is_dir() else "run setup again")
+    rebuild.ready(data, staged.names())
     process = prefix.in_use(pfx)
     if process:
         raise ValueError(f"the new runner is ready, but a program still runs in the prefix ({process}); close the app and run setup again")
@@ -225,13 +246,18 @@ def renew(data, live, pfx):
         raise ValueError(f"the new runner did not pass its check in place ({error}); the one before it is back") from None
     rebuild.discard(data)
     print(f"switch: complete ({time.monotonic() - start:.1f}s)", flush=True)
+    if before and before["base"] != name:
+        for folder in sorted((data / "runners").iterdir()):
+            if folder not in (live.base, live.pe_runner, live.assembled) and release(folder) == before["base"]:
+                print(f"{folder} ({before['base']}) is no longer used and can be deleted", flush=True)
 
 
-def whole(staged):
+def release(folder):
+    """The release an unpacked runner says it is, None for any other folder."""
     try:
-        return staged.current()
-    except (OSError, ValueError, KeyError, TypeError, SystemExit):
-        return False
+        return (folder / "version").read_text().split()[1]
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def setup_main(argv=None):

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ProtonCats and contributors
 # SPDX-License-Identifier: MIT
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -72,6 +73,7 @@ class Entry(unittest.TestCase):
             struct.pack_into("<H", dll, 84, 128)
             struct.pack_into("<II", dll, 208, 4096, 20)
             struct.pack_into("<8sIIII", dll, 216, b"section", 100, 4096, 100, 300)
+            dll[420:452] = hashlib.sha256(self.patch_file.read_bytes()).digest()
             self.put(work / "out/sample.dll", dll)
         elif args[0] == "assemble":
             out = arg("--out")
@@ -331,7 +333,10 @@ class Entry(unittest.TestCase):
         self.assertNotIn("remove", self.stderr.getvalue())
 
     def runner_bytes(self):
-        return {name: data for name, data in self.tree().items() if name.startswith("data/runners/patched/")}
+        runner = self.data / "runners/patched"
+        found = {str(p.relative_to(runner)): p.read_bytes() for p in runner.rglob("*") if p.is_file()}
+        self.assertIn("version", found)
+        return found
 
     def new_patch(self, text=b"another patch"):
         self.patch_file.write_bytes(text)
@@ -345,7 +350,7 @@ class Entry(unittest.TestCase):
 
     def test_a_changed_patch_ends_in_the_new_runner_with_one_setup(self):
         self.assertEqual(self.setup(), 0, self.stderr.getvalue())
-        before, old = self.prefix_tree(), (self.data / "runner-work/.patched").read_bytes()
+        before, old = self.prefix_tree(), self.runner_bytes()
         self.new_patch()
         calls = []
         with self.noting(calls):
@@ -355,7 +360,7 @@ class Entry(unittest.TestCase):
             for option in ("--work", "--out"):
                 if option in call:
                     self.assertTrue(Path(call[call.index(option) + 1]).is_relative_to(self.data / "rebuild"), call)
-        self.assertNotEqual((self.data / "runner-work/.patched").read_bytes(), old)
+        self.assertNotEqual(self.runner_bytes(), old)
         self.assertNotIn("remove", self.stderr.getvalue())
         self.assertFalse((self.data / "rebuild").exists())
         self.assertEqual(en.profiles.treehash.compare(self.data / "pfx", before), [])
@@ -382,11 +387,19 @@ class Entry(unittest.TestCase):
     def test_a_changed_pin_is_rebuilt_from_the_new_download(self):
         self.assertEqual(self.setup(), 0)
         old_base = self.base
+        self.put(self.data / "runners/other/version", b"1 Other\n")
+        (self.data / "runners/empty").mkdir()
+        self.put(self.data / "runners/odd/version", b"\xff")
         self.pins.write_text(json.dumps({"ge_tag": "Release-2", "ge_asset": "Release-2-x86_64"}))
         with patch.object(en.runner, "main", side_effect=lambda args: self.stage_release(args, "Release-2", 300)):
             self.assertEqual(self.setup(), 0, self.stderr.getvalue())
         self.assertEqual(json.loads((self.data / "runners/patched/halation-runner.json").read_text())["base"], "Release-2")
         self.assertTrue(old_base.exists())
+        notice = f"{old_base} (Release-1) is no longer used and can be deleted"
+        self.assertEqual(self.stdout.getvalue().count(notice), 1)
+        self.assertEqual(self.stdout.getvalue().count("can be deleted"), 1)
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertEqual(self.stdout.getvalue().count("can be deleted"), 1)
 
     def test_a_failure_or_kill_at_any_step_keeps_the_old_runner_and_the_next_setup_ends_well(self):
         class Kill(BaseException):
@@ -473,18 +486,88 @@ class Entry(unittest.TestCase):
         calls = []
         with self.noting(calls):
             self.assertEqual(self.setup(), 0, self.stderr.getvalue())
-        self.assertEqual([c[0] for c in calls], ["build", "assemble"])
+        self.assertEqual([c[0] for c in calls], ["assemble"])
 
-    def test_a_staged_set_for_other_inputs_is_built_again(self):
+    def test_a_staged_set_for_other_inputs_is_deleted_whole(self):
         self.assertEqual(self.setup(), 0)
         self.new_patch(b"second")
         with patch.object(en.prefix, "in_use", return_value="app.exe, process 7"):
             self.assertEqual(self.setup(), 2)
         self.new_patch(b"third")
+        self.put(self.data / "rebuild/stray", b"stray")
         calls = []
-        with self.noting(calls):
+        def action(args):
+            calls.append(args[0])
+            self.assertFalse((self.data / "rebuild/stray").exists())
+            return self.stage(args)
+        with patch.object(en.runner, "main", side_effect=action):
             self.assertEqual(self.setup(), 0, self.stderr.getvalue())
-        self.assertEqual([c[0] for c in calls], ["build", "assemble"])
+        self.assertEqual(calls, ["build", "assemble"])
+
+    def test_an_unfinished_set_is_resumed_at_the_step_that_failed(self):
+        self.assertEqual(self.setup(), 0)
+        for leftover in (None, "rebuild/runners/patched/half"):
+            with self.subTest(leftover=leftover):
+                self.new_patch(str(leftover).encode())
+                def action(args):
+                    if args[0] == "assemble":
+                        if leftover:
+                            self.put(self.data / leftover, b"half")
+                        return 4
+                    return self.stage(args)
+                with patch.object(en.runner, "main", side_effect=action):
+                    self.assertEqual(self.setup(), 2)
+                calls = []
+                self.stdout.truncate(0)
+                with self.noting(calls):
+                    self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+                self.assertEqual([c[0] for c in calls], ["assemble"])
+                self.assertIn("build: verified, skipped", self.stdout.getvalue())
+                self.assertFalse((self.data / "rebuild").exists())
+                self.assertFalse((self.data / "runners/patched/half").exists())
+        self.assertNotIn("remove", self.stderr.getvalue())
+
+    def test_a_staged_step_that_fails_its_own_check_names_no_folder(self):
+        self.assertEqual(self.setup(), 0)
+        old = self.runner_bytes()
+        self.new_patch()
+        def action(args):
+            code = self.stage(args)
+            if args[0] == "assemble":
+                (Path(args[args.index("--out") + 1]) / en.LIB / "sample.dll").write_bytes(b"wrong")
+            return code
+        with patch.object(en.runner, "main", side_effect=action):
+            self.assertEqual(self.setup(), 2)
+        self.assertIn("assemble did not pass its check; the runner in use is unchanged, run setup again", self.stderr.getvalue())
+        self.assertNotIn("remove", self.stderr.getvalue())
+        self.assertEqual(self.runner_bytes(), old)
+
+    def test_a_first_build_that_fails_says_to_run_setup_again(self):
+        with patch.object(en.runner, "main", side_effect=lambda args: 4 if args[0] == "build" else self.stage(args)):
+            self.assertEqual(self.setup(), 2)
+        self.assertIn("build failed with exit 4; run setup again", self.stderr.getvalue())
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+
+    def test_a_set_made_in_place_by_an_earlier_setup_is_recognised(self):
+        self.stage(["fetch"])
+        self.stage(["build", "--work", str(self.data / "runner-work")])
+        self.stage(["assemble", "--work", str(self.data / "runner-work"), "--base", str(self.base), "--out", str(self.data / "runners/patched")])
+        self.forbid_work = True
+        with patch.object(en.profiles, "main", side_effect=self.apply_only):
+            self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        for step in ("build", "assemble"):
+            self.assertIn(f"{step}: verified, skipped", self.stdout.getvalue())
+        self.forbid_work = False
+        self.new_patch()
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertIn("switch: complete", self.stdout.getvalue())
+
+    def apply_only(self, args):
+        self.forbid_work = False
+        try:
+            return self.stage(args)
+        finally:
+            self.forbid_work = True
 
     def test_no_older_runner_than_the_prefix_knows(self):
         self.assertEqual(self.setup(), 0)
@@ -542,13 +625,17 @@ class Entry(unittest.TestCase):
         work.rename(self.root / "real-work")
         self.put(outside / "keep", b"keep")
         work.symlink_to(outside)
+        self.forbid_work = True
         self.assertEqual(self.setup(), 2)
+        self.assertIn("not a folder setup made", self.stderr.getvalue())
+        self.stderr.truncate(0)
         self.assertEqual((outside / "keep").read_bytes(), b"keep")
         self.assertTrue(work.is_symlink())
         work.unlink()
         (self.root / "real-work").rename(work)
         (work / "system.reg").write_text("a prefix")
         self.assertEqual(self.setup(), 2)
+        self.forbid_work = False
         self.assertIn("not a folder setup made", self.stderr.getvalue())
         self.assertTrue((work / "system.reg").exists())
 
@@ -596,9 +683,12 @@ class Entry(unittest.TestCase):
         pins = json.loads(self.pins.read_text())
         pins["unix"] = {"fixture": True}
         self.pins.write_text(json.dumps(pins))
-        identity = en.runner.patch_identity(self.pins.read_bytes(), [(unix_patch, ["winex11.drv"])], "unix")
-        record = {"identity": identity, "driver_version": 111,
-                  "artifacts": {name: en.runner.sha256(unix_patch) for name in en.runner.UNIX_FILES}}
+        record = {}
+        def new_unix_patch(text):
+            unix_patch.write_bytes(text)
+            record.update(identity=en.runner.patch_identity(self.pins.read_bytes(), [(unix_patch, ["winex11.drv"])], "unix"),
+                          driver_version=111, artifacts={name: en.runner.sha256(unix_patch) for name in en.runner.UNIX_FILES})
+        new_unix_patch(b"Unix patch")
         calls = []
         def action(args):
             calls.append((args[0], "unix" if "--mode" in args else "pe"))
@@ -616,7 +706,7 @@ class Entry(unittest.TestCase):
                 work = arg("--work")
                 self.put(work / "unix-build.json", json.dumps(record).encode())
                 for name in en.runner.UNIX_FILES:
-                    self.put(work / "out" / name, b"Unix patch")
+                    self.put(work / "out" / name, unix_patch.read_bytes())
             else:
                 base, out = arg("--base"), arg("--out")
                 shutil.copytree(base, out)
@@ -624,7 +714,7 @@ class Entry(unittest.TestCase):
                 manifest["patches"] = sorted(p.name for p, _ in patches)
                 files = {}
                 for name, relative in en.runner.UNIX_FILES.items():
-                    self.put(out / relative, b"Unix patch")
+                    self.put(out / relative, unix_patch.read_bytes())
                     files[relative] = {"sha256": record["artifacts"][name], "replaces": en.runner.sha256(base / relative)}
                 self.put(out / "proton", en.runner.allow_opencl((base / "proton").read_text()).encode())
                 proton = {"sha256": en.runner.sha256(out / "proton"), "replaces": en.runner.sha256(base / "proton")}
@@ -649,9 +739,16 @@ class Entry(unittest.TestCase):
             self.assertEqual(calls, [])
             (self.data / "runners/patched" / en.runner.UNIX_FILES["winex11.so"]).write_bytes(b"Unix patch")
             self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+            script = (self.data / "runners/patched/proton").read_text()
             (self.data / "runners/patched/proton").write_text("    " + en.runner.OPENCL_OVERRIDE + "\n")
             self.assertEqual(self.setup(), 2)
             self.assertEqual(calls, [])
+            (self.data / "runners/patched/proton").write_text(script)
+            new_unix_patch(b"another Unix patch")
+            self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+            self.assertEqual(calls, [("build", "pe"), ("assemble", "pe"), ("build", "unix"), ("assemble", "unix")])
+            self.assertEqual((self.data / "runners/patched" / en.runner.UNIX_FILES["winex11.so"]).read_bytes(), b"another Unix patch")
+            self.assertFalse((self.data / "rebuild").exists())
 
     def test_run_forwards_profile_program_and_extra_arguments(self):
         self.assertEqual(self.setup(), 0)

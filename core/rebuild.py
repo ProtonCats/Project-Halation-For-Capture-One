@@ -31,6 +31,12 @@ def own(folder):
         foreign(folder)
 
 
+def check_folders(root):
+    for name in NAMES:
+        if os.path.lexists(root / name):
+            own(root / name)
+
+
 def state(data):
     """The journal of the staging folder, None when there is no staging folder."""
     staging = data / STAGING
@@ -56,30 +62,46 @@ def move(source, target):
     os.rename(source, target)
 
 
-def discard(data):
-    """Delete the staging folder, with whatever old folders were moved into it."""
+def settled(data):
+    """The journal, with every folder that a delete could reach checked; None when there is no staging folder."""
     journal, staging = state(data), data / STAGING
     if journal is None:
-        return
+        return None
     if journal["state"] in ("switching", "undoing"):
         raise ValueError(f"{staging} is in the middle of a switch")
     for root in (staging, staging / OLD):
         for folder in (root.iterdir() if root.is_dir() else ()):
             if folder.is_dir() and folder != staging / OLD:
                 own(folder)
-        for name in NAMES:
-            if os.path.lexists(root / name):
-                own(root / name)
-    shutil.rmtree(staging)
+        check_folders(root)
+    return journal
+
+
+def discard(data):
+    """Delete the staging folder, with whatever old folders were moved into it."""
+    if settled(data):
+        shutil.rmtree(data / STAGING)
+
+
+def clear(data, name):
+    """Delete one unfinished folder of the set that is being built."""
+    if name not in NAMES:
+        raise ValueError(f"{name} is not a folder of the runner")
+    if settled(data)["state"] != "building":
+        raise ValueError(f"{data / STAGING} is not being built")
+    if os.path.lexists(data / STAGING / name):
+        shutil.rmtree(data / STAGING / name)
+
+
+def size(root):
+    return sum(os.lstat(os.path.join(folder, file)).st_size
+               for name in NAMES for folder, _, files in os.walk(root / name) for file in files)
 
 
 def check_space(data):
-    """Refuse when the disk cannot hold a second set beside the present one."""
-    present = 0
-    for name in NAMES:
-        for folder, _, files in os.walk(data / name):
-            present += sum(os.lstat(os.path.join(folder, file)).st_size for file in files)
-    need = present + MARGIN if present else FIRST_SET
+    """Refuse when the disk cannot hold a second set beside the present one; what is staged already counts as room."""
+    present = size(data)
+    need = (present + MARGIN if present else FIRST_SET) - size(data / STAGING)
     free = shutil.disk_usage(data).free
     if free < need:
         raise ValueError(f"building the runner needs {need / 1e9:.1f} GB in {data}, {free / 1e9:.1f} GB free; nothing was changed")
@@ -92,6 +114,11 @@ def begin(data, inputs):
     record(data, {"state": "building", "inputs": inputs})
 
 
+def resume(data):
+    """Go on with the set that is staged."""
+    record(data, {**settled(data), "state": "building"})
+
+
 def ready(data, names):
     record(data, {**state(data), "state": "ready", "names": list(names)})
 
@@ -100,10 +127,8 @@ def switch(data):
     """Move the old folders into the staging folder and the new ones into their place; repeating it is harmless."""
     journal = state(data)
     if journal["state"] == "ready":
-        for name in NAMES:
-            for folder in (data / name, data / STAGING / name):
-                if os.path.lexists(folder):
-                    own(folder)
+        check_folders(data)
+        check_folders(data / STAGING)
         journal = {**journal, "state": "switching", "had": [name for name in NAMES if os.path.lexists(data / name)]}
         record(data, journal)
     for name in NAMES:

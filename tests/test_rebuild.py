@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,7 +126,6 @@ class Rebuild(unittest.TestCase):
                     self.assertEqual(rb.state(self.data)["state"], "undone")
 
     def remove(self, name):
-        import shutil
         path = self.data / name
         if path.exists():
             shutil.rmtree(path)
@@ -167,6 +167,26 @@ class Rebuild(unittest.TestCase):
                     self.assertTrue(os.path.lexists(path))
                     self.assertEqual((outside / "keep").read_text(), "keep")
 
+    def test_a_staged_folder_that_is_a_link_or_a_prefix_is_not_switched_in(self):
+        self.put("outside/keep", "keep")
+        for kind in ("link", "system.reg"):
+            for name in rb.NAMES:
+                with self.subTest(kind=kind, name=name):
+                    for other in (*rb.NAMES, "rebuild"):
+                        self.remove(other)
+                    self.old_set()
+                    self.staged_set()
+                    path = self.staging / name
+                    if kind == "link":
+                        shutil.rmtree(path)
+                        path.symlink_to(self.data / "outside")
+                    else:
+                        (path / kind).write_text("prefix")
+                    with self.assertRaisesRegex(ValueError, "not a folder setup made"):
+                        rb.switch(self.data)
+                    self.assertEqual(self.contents(), dict.fromkeys(rb.NAMES, "old"))
+                    self.assertEqual(rb.state(self.data)["state"], "ready")
+
     def test_a_staging_folder_without_its_record_is_never_deleted(self):
         self.put("rebuild/something", "keep")
         for text in (None, "", "{", "[]", '{"state": 1}', '{"state": "unknown", "inputs": {}}'):
@@ -206,16 +226,57 @@ class Rebuild(unittest.TestCase):
     def test_a_staging_folder_in_the_middle_of_a_switch_is_never_cleared(self):
         self.old_set()
         self.staged_set()
-        real = rb.move
-        with patch.object(rb, "move", side_effect=[real, Stop]) as move:
-            move.side_effect = lambda s, t, n=iter((0, 1)): real(s, t) if next(n) == 0 else (_ for _ in ()).throw(Stop())
-            with self.assertRaises(Stop):
-                rb.switch(self.data)
-        for action in (lambda: rb.begin(self.data, INPUTS), lambda: rb.discard(self.data)):
-            with self.assertRaisesRegex(ValueError, "in the middle of a switch"):
-                action()
-        rb.recover(self.data)
-        self.assertEqual(self.contents(), dict.fromkeys(rb.NAMES, "new"))
+        for action, end in ((rb.switch, "new"), (rb.undo, "old")):
+            with patch.object(rb, "move", side_effect=Stop), self.assertRaises(Stop):
+                action(self.data)
+            before = treehash.snapshot(self.data)
+            for clearing in (lambda: rb.begin(self.data, INPUTS), lambda: rb.discard(self.data),
+                             lambda: rb.clear(self.data, "runner-work"), lambda: rb.resume(self.data)):
+                with self.assertRaisesRegex(ValueError, "in the middle of a switch"):
+                    clearing()
+            self.assertEqual(treehash.compare(self.data, before), [])
+            rb.recover(self.data)
+            self.assertEqual(self.contents(), dict.fromkeys(rb.NAMES, end))
+
+    def test_only_one_unfinished_folder_is_cleared(self):
+        self.staged_set()
+        rb.resume(self.data)
+        self.assertEqual(rb.state(self.data)["state"], "building")
+        rb.clear(self.data, "runners/patched-pe")
+        self.assertEqual(sorted(str(p.relative_to(self.staging)) for p in self.staging.rglob("content")),
+                         ["runner-work-unix/content", "runner-work/content", "runners/patched/content"])
+        rb.clear(self.data, "runners/patched-pe")
+
+    def test_only_folders_of_the_staged_set_are_cleared(self):
+        self.old_set()
+        self.staged_set()
+        rb.resume(self.data)
+        before = treehash.snapshot(self.data)
+        for name in ("", ".", "..", "../pfx", "pfx", "old", "runners", "/", str(self.data / "pfx"), "rebuild.json"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "not a folder of the runner"):
+                rb.clear(self.data, name)
+        self.assertEqual(treehash.compare(self.data, before), [])
+        self.put("rebuild/runner-work/system.reg", "prefix")
+        with self.assertRaisesRegex(ValueError, "not a folder setup made"):
+            rb.clear(self.data, "runner-work")
+        self.assertTrue((self.staging / "runner-work/system.reg").exists())
+
+    def test_a_finished_staged_set_is_not_cleared_without_being_reopened(self):
+        self.staged_set()
+        with self.assertRaisesRegex(ValueError, "is not being built"):
+            rb.clear(self.data, "runner-work")
+
+    def test_what_is_already_staged_needs_no_space_again(self):
+        self.old_set()
+        self.put("runners/patched/large", "x" * 300000)
+        self.staged_set()
+        self.put("rebuild/runners/patched/large", "x" * 200000)
+        need = rb.MARGIN + 300000 - 200000
+        with patch.object(rb.shutil, "disk_usage", return_value=SimpleNamespace(free=need)):
+            rb.check_space(self.data)
+        with patch.object(rb.shutil, "disk_usage", return_value=SimpleNamespace(free=need - 1)), \
+                self.assertRaisesRegex(ValueError, "free"):
+            rb.check_space(self.data)
 
     def test_the_space_needed_is_the_present_set_and_a_margin(self):
         with patch.object(rb.shutil, "disk_usage", return_value=SimpleNamespace(free=rb.FIRST_SET - 1)), \
