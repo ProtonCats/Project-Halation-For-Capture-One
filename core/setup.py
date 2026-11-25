@@ -23,6 +23,7 @@ registry values, overrides, Windows version and new prerequisites; the installer
 not run again, and a changed install_dir is refused.
 """
 import argparse
+from collections import namedtuple
 import hashlib
 import http.client
 import json
@@ -46,6 +47,8 @@ else:
     import display_profile
 
 MARKER = ".setup.json"
+PREVIOUS = ".setup.json.previous"
+INTERRUPTED = "if an update was interrupted, start the app, let it finish, close the app and run setup again"
 INSTALLER_RETRIES = 1
 WINDOWS_TIMEOUT = 900
 INSTALLER_TIMEOUT = 1800
@@ -55,8 +58,21 @@ REGISTRY_PREFIXES = ("hkcu\\software\\wine\\", "hkcu\\software\\microsoft\\avalo
 NETFX48_BUILTINS = ("uiautomationcore", "dxva2", "evr")
 
 
+class Refused(ValueError):
+    """Why a finished prefix is left as it is; never a reason to remove it."""
+
+
+# What a finished prefix holds and needs: record is its marker, tree its install folder now, version the new one of an
+# app that updated itself, outdated whether apply has something to write.
+State = namedtuple("State", "record tree version outdated")
+
+
 def die(message):
     raise SystemExit(f"setup.py: {message}")
+
+
+def refuse(prefix, reason):
+    raise Refused(f"{prefix} was left as it is: {reason}. Keep it: it holds the installed app, its settings and its activation")
 
 
 def text(value):
@@ -169,57 +185,170 @@ def unchanged(path, before):
     return path.is_dir() and not path.is_symlink() and not treehash.compare(path, before["entries"])
 
 
-def write_marker(prefix, record):
-    fd, temp = tempfile.mkstemp(prefix=".setup-", dir=prefix)
+def replace_file(path, data):
+    """Put data at path in one step that survives a power cut."""
+    fd, temp = tempfile.mkstemp(prefix=".setup-", dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as out:
-            json.dump(record, out)
-            out.write("\n")
-        os.replace(temp, prefix / MARKER)
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, path)
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
 
 
-def program_version(install, relative):
-    return peversion.program_version(install, relative)[0]
+def write_marker(prefix, record):
+    """Replace the marker and keep the one before it beside it."""
+    marker = prefix / MARKER
+    if marker.is_file() and not marker.is_symlink():
+        replace_file(prefix / PREVIOUS, marker.read_bytes())
+    replace_file(marker, (json.dumps(record) + "\n").encode())
+    folder = os.open(prefix, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(folder)
+    finally:
+        os.close(folder)
 
 
-def accept_update(prefix, record, relative):
-    """Record the folder of an app that updated itself; False when nothing shows that it did.
+def read_marker(prefix):
+    marker = prefix / MARKER
+    try:
+        record = json.loads(marker.read_bytes())
+        if marker.is_symlink() or not isinstance(record["profile_sha256"], str) \
+                or not isinstance(record["install_tree"]["entries"], list) \
+                or not isinstance(record.get("refused", {}), dict) or not isinstance(record.get("prerequisites", []), list):
+            raise ValueError("unexpected content")
+        install_path(prefix, record["install_dir"])
+        peversion.parts(record.get("program_version") or "0")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        before = f"; the one before it is in {PREVIOUS}" if (prefix / PREVIOUS).is_file() else ""
+        refuse(prefix, f"its record {MARKER} cannot be read{before}")
+    return record
 
-    The program's own version must differ from the recorded one. A marker from before versions were recorded counts
-    only when the program file itself changed.
-    """
-    install = install_path(prefix, record["install_dir"])
-    if not relative or not install.is_dir():
-        return False
-    new, old = program_version(install, relative), record.get("program_version")
-    if not new or new == old:
-        return False
+
+def by_path(tree):
+    return {entry["path"]: entry for entry in tree["entries"]}
+
+
+def differing(before, now):
+    """Paths that differ between two snapshots; one from before the root entry existed lacks it."""
+    before, now = by_path(before), by_path(now)
+    if "." not in before:
+        now.pop(".", None)
+    return sorted(path for path in before.keys() | now.keys() if before.get(path) != now.get(path))
+
+
+def bound_version(install, relative, tree):
+    """The program's version, read from the very bytes the snapshot records; None otherwise."""
+    version, digest = peversion.program_version(install, relative)
+    entry = by_path(tree).get(str(PurePosixPath(relative)), {})
+    return version if digest and entry.get("sha256") == digest else None
+
+
+def with_version(record, install, profile):
+    """The record with the profile's program and its version; a program without one changes nothing."""
+    version = bound_version(install, profile["program"], record["install_tree"]) if profile.get("program") else None
+    return {**record, "program": profile["program"], "program_version": version} if version else record
+
+
+def refuse_running(prefix):
+    process = px.in_use(prefix)
+    if process:
+        refuse(prefix, f"a program still runs in it ({process}); close the app and run setup again")
+
+
+def updated(prefix, record, program, tree, changed):
+    """The new version of an app whose changed folder is its own update; Refused says why it is not one."""
+    refuse_running(prefix)
+    before, now = by_path(record["install_tree"]), by_path(tree)
+    ours = [path for path, entry in record.get("refused", {}).items() if now.get(path) == entry]
+    if ours:
+        refuse(prefix, f"{ours[0]} is still as a Halation step left it, so its folder is not taken for an update")
+    if not record.get("program") and not program:
+        refuse(prefix, "its install folder changed and the profile names no program to judge that by")
+    relative, old = str(PurePosixPath(record.get("program") or program)), record.get("program_version")
+    if relative not in now:
+        refuse(prefix, f"its program {relative} is missing; {INTERRUPTED}")
+    new = bound_version(install_path(prefix, record["install_dir"]), relative, tree)
+    if not new:
+        refuse(prefix, f"the version of its program cannot be read; {INTERRUPTED}")
     if old is None:
-        entry = next((e for e in record["install_tree"]["entries"] if e["path"] == relative), None)
-        if entry is None or entry.get("sha256") == runner.sha256(install / relative):
-            return False
-    tree = snapshot(install)
-    before, after = ({e["path"]: e for e in entries} for entries in (record["install_tree"]["entries"], tree["entries"]))
-    count = sum(before.get(path) != after.get(path) for path in before.keys() | after.keys()
-                if (before.get(path) or after[path])["type"] != "dir")
-    write_marker(prefix, {**record, "install_tree": tree, "program": relative, "program_version": new})
-    print(f"the app updated itself: {old or 'an earlier version'} to {new} ({count} files changed); "
-          "its folder is recorded as the known-good one", flush=True)
-    return True
+        if relative not in before or before[relative].get("sha256") == now[relative]["sha256"]:
+            refuse(prefix, f"its install folder changed, but its program did not (for example {changed[0]}); {INTERRUPTED}")
+    elif peversion.parts(new) < peversion.parts(old):
+        refuse(prefix, f"its program went back from {old} to {new}")
+    elif new == old:
+        refuse(prefix, f"{len(changed)} of its files changed while the version of its program stayed {old} "
+                       f"(for example {changed[0]}); {INTERRUPTED}")
+    return new
 
 
-def guarded(prefix, relative, action, allow_creation=False):
+def examine(prefix, profile, digest, runner_dir):
+    """What a finished prefix needs, without writing anything; Refused when setup must leave it as it is."""
+    record = read_marker(prefix)
+    if record["install_dir"] != profile["install_dir"]:
+        refuse(prefix, f"the profile expects the app in {profile['install_dir']}, but it is installed in "
+                       f"{record['install_dir']}, and an installed app is never moved")
+    if not px.ready(prefix):
+        refuse(prefix, "its registry (system.reg) is missing or incomplete")
+    stamp, name = px.runner_version(runner_dir)
+    try:
+        history = px.runner_history(prefix)
+    except SystemExit:
+        refuse(prefix, f"its runner record {px.MARKER} cannot be read")
+    if history and history["stamp"] > stamp:
+        refuse(prefix, f"it was last used by {history['runner']}, newer than {name}; "
+                       "runners only move forward, so update Halation")
+    install, program = install_path(prefix, record["install_dir"]), profile.get("program")
+    try:
+        tree = snapshot(install)
+    except FileNotFoundError as error:
+        refuse(prefix, f"a file vanished while its install folder was read ({error.filename}); let the app finish, "
+                       "close it and run setup again")
+    except OSError as error:
+        refuse(prefix, f"its install folder cannot be read ({error})")
+    if tree is None:
+        refuse(prefix, "its install folder is missing")
+    changed = differing(record["install_tree"], tree)
+    version = updated(prefix, record, program, tree, changed) if changed else None
+    if program and not ((install / program).is_file() and (install / program).resolve().is_relative_to(install.resolve())):
+        refuse(prefix, f"the program {program} is not in its install folder")
+    same = record["profile_sha256"] == digest
+    return State(record, tree, version, bool(version) or not same or filled(record, install, profile) != record)
+
+
+def filled(record, install, profile):
+    """The marker of an applied profile and an unchanged folder, with what earlier versions did not record."""
+    record = {key: value for key, value in record.items() if key != "refused"}
+    if not record.get("program_version"):
+        record = with_version(record, install, profile)
+    return {"shape": shape(profile), "prerequisites": recorded(profile["prerequisites"]), **record}
+
+
+def guarded(prefix, relative, action, allow_creation=False, record=None):
+    """Run a step and refuse any change of the install folder. With a record its tree is what the folder must be, and
+    a change is remembered there, so that the next setup does not take it for the app's own update."""
     path = install_path(prefix, relative)
-    before = snapshot(path)
+    before = record["install_tree"] if record else snapshot(path)
+    if record and not unchanged(path, before):
+        refuse(prefix, "its install folder changed after it was checked; run setup again")
     try:
         return action()
     finally:
         path = install_path(prefix, relative)
         if not (allow_creation and before is None) and not unchanged(path, before):
-            die("install folder changed during a Windows step")
+            note = ""
+            if record:
+                try:
+                    now = snapshot(path) or {"entries": []}
+                    left = by_path(now)
+                    record["refused"] = {**record.get("refused", {}), **{p: left.get(p) for p in differing(before, now)}}
+                    write_marker(prefix, record)
+                except OSError as error:
+                    note = f", and setup could not note it: {error}"
+            die(f"install folder changed during a Windows step{note}")
 
 
 class ProfileRedirect(urllib.request.HTTPRedirectHandler):
@@ -281,7 +410,7 @@ def prerequisites(items, cache):
                 directory.rmdir()
 
 
-def windows(runner_dir, prefix, relative, action, allow_creation=False):
+def windows(runner_dir, prefix, relative, action, allow_creation=False, record=None):
     """Guard a batch, bound every command, and wait for its server once."""
     env = px.environment(runner_dir, prefix)
     log = prefix / ".setup.log"
@@ -313,7 +442,7 @@ def windows(runner_dir, prefix, relative, action, allow_creation=False):
             return action(step)
         finally:
             runner.run([str(runner_dir / "files/bin/wineserver"), "-w"], env=env, log=log, timeout=SERVER_TIMEOUT)
-    return guarded(prefix, relative, execute, allow_creation)
+    return guarded(prefix, relative, execute, allow_creation, record)
 
 
 def protected_install(prefix):
@@ -336,14 +465,16 @@ def protected_install(prefix):
     return relative, recorded
 
 
-def configure(profile, items, paths):
+def configure(profile, items, paths, begin=lambda: None, done=lambda item: None):
     """The Windows steps that shape a prefix: the given prerequisites, then version, overrides and registry values."""
     def steps(step):
+        begin()
         for item, path in zip(items, paths):
             if runner.sha256(path) != item["sha256"]:
                 path.unlink()
                 die(f"checksum mismatch for {item['name']}")
             step(program(path, item["args"]))
+            done(item)
         step(["winecfg", "-v", profile["windows_version"]])
         for dll, mode in profile["dll_overrides"].items():
             step(["reg", "add", "HKCU\\Software\\Wine\\DllOverrides", "/v", dll,
@@ -372,34 +503,82 @@ def shape(profile):
                                      sort_keys=True).encode()).hexdigest()
 
 
+def recorded(items, before=()):
+    """What a marker says of prerequisites that ran: the ones before, then each of items once."""
+    kept = [{"name": item["name"], "sha256": item["sha256"]} for item in before]
+    for item in items:
+        entry = {"name": item["name"], "sha256": item["sha256"]}
+        if entry not in kept:
+            kept.append(entry)
+    return kept
+
+
 def applied_record(record, profile, digest):
+    record = {key: value for key, value in record.items() if key != "refused"}
     return {**record, "profile_sha256": digest, "shape": shape(profile),
-            "prerequisites": [{"name": item["name"], "sha256": item["sha256"]} for item in profile["prerequisites"]]}
+            "prerequisites": recorded(profile["prerequisites"], record.get("prerequisites", []))}
+
+
+def bring_up_to_date(args, profile, digest, runner_dir, prefix, cache):
+    """Record an app that updated itself, then apply what changed in the profile."""
+    state = examine(prefix, profile, digest, runner_dir)
+    record, install = state.record, install_path(prefix, state.record["install_dir"])
+    if state.version:
+        old, program = record.get("program_version") or "an earlier version", record.get("program") or profile["program"]
+        files = [path for path in differing(record["install_tree"], state.tree)
+                 if (by_path(state.tree).get(path) or by_path(record["install_tree"])[path])["type"] != "dir"]
+        record = {key: value for key, value in record.items() if key != "refused"}
+        record.update(install_tree=state.tree, program=program, program_version=state.version)
+        if not args.dry_run:
+            try:
+                again = snapshot(install)
+            except OSError:
+                again = None
+            if again != state.tree or bound_version(install, program, again) != state.version:
+                refuse(prefix, "its install folder is still changing; let the app finish, close it and run setup again")
+            refuse_running(prefix)
+            write_marker(prefix, record)
+        print(f"the app updated itself: {old} to {state.version} ({len(files)} files changed); its folder "
+              f"{'would be' if args.dry_run else 'is'} recorded as the known-good one", flush=True)
+    if record["profile_sha256"] != digest:
+        return update_profile(args, profile, digest, record, cache)
+    complete = filled(record, install, profile)
+    if complete != record and not args.dry_run:
+        write_marker(prefix, complete)
+    print("profile already applied" + ("" if state.outdated else "; nothing changed"))
+    return 0
 
 
 def update_profile(args, profile, digest, record, cache):
-    """Apply a changed profile to a prefix whose install folder was just found unchanged."""
+    """Apply a changed profile to a prefix whose install folder was just found to be the recorded one."""
     runner_dir, prefix, stamp, name = px.checked_runner(args)
-    relative = profile["install_dir"]
-    if record["install_dir"] != relative:
-        die("the profile moved its install folder; use a fresh prefix")
-    ran = [(item["name"], item["sha256"]) for item in record.get("prerequisites", [])]
-    items = [item for item in profile["prerequisites"] if (item["name"], item["sha256"]) not in ran]
-    if items or record.get("shape") != shape(profile):
+    relative, install = record["install_dir"], install_path(prefix, record["install_dir"])
+    ran = recorded(record.get("prerequisites", []))
+    items = [item for item in profile["prerequisites"] if recorded([item])[0] not in ran]
+    steps = items or record.get("shape") != shape(profile)
+    if steps:
         print(f"update prefix {prefix}; set Windows version {profile['windows_version']}")
         announce(profile, items)
-        if args.dry_run:
-            return 0
-        paths = prerequisites(items, cache)
-        px.record_runner(prefix, stamp, name)
-        windows(runner_dir, prefix, relative, configure(profile, items, paths))
-    elif args.dry_run:
+    else:
+        print(f"update prefix {prefix}; only launch settings changed")
+    if args.dry_run:
         return 0
-    record = applied_record(record, profile, digest)
-    if profile.get("program"):
-        record.update(program=profile["program"],
-                      program_version=program_version(install_path(prefix, relative), profile["program"]))
-    write_marker(prefix, record)
+    refuse_running(prefix)
+    record = dict(record)
+    if steps:
+        paths = prerequisites(items, cache)
+        refuse_running(prefix)
+        def begin():
+            px.record_runner(prefix, stamp, name)
+            record.update(profile_sha256="", shape=None)
+            write_marker(prefix, record)
+        def done(item):
+            record["prerequisites"] = recorded([item], record.get("prerequisites", []))
+            write_marker(prefix, record)
+        windows(runner_dir, prefix, relative, configure(profile, items, paths, begin, done), record=record)
+    if not unchanged(install, record["install_tree"]):
+        refuse(prefix, "its install folder changed after it was checked; run setup again")
+    write_marker(prefix, with_version(applied_record(record, profile, digest), install, profile))
     print("profile updated in place; the app and its folder were not touched")
     return 0
 
@@ -425,17 +604,8 @@ def apply(args):
     marker, cache = prefix / MARKER, prefix.parent / ".setup-cache"
     if marker.is_symlink() or cache == prefix:
         die("unsafe setup metadata location")
-    if marker.exists():
-        old = json.loads(marker.read_text())
-        if old["profile_sha256"] != digest and old["install_dir"] != relative:
-            die("the profile moved its install folder; use a fresh prefix")
-        if not px.ready(prefix) or not (unchanged(install, old["install_tree"])
-                                        or accept_update(prefix, old, profile.get("program"))):
-            die("recorded install folder changed or prefix is not ready")
-        if old["profile_sha256"] != digest:
-            return update_profile(args, profile, digest, json.loads(marker.read_text()), cache)
-        print("profile already applied; nothing changed")
-        return 0
+    if os.path.lexists(marker):
+        return bring_up_to_date(args, profile, digest, runner_dir, prefix, cache)
     print(f"create prefix {prefix}; set Windows version {profile['windows_version']}")
     announce(profile, profile["prerequisites"])
     print(f"run local installer {installer} {profile['installer_args']}; snapshot {install}")
@@ -462,9 +632,7 @@ def apply(args):
     if final is None:
         die("installer did not create install_dir")
     record = applied_record({"install_dir": relative, "install_tree": final}, profile, digest)
-    if profile.get("program"):
-        record.update(program=profile["program"], program_version=program_version(install, profile["program"]))
-    write_marker(prefix, record)
+    write_marker(prefix, with_version(record, install, profile))
     print("profile applied; install folder recorded")
     return 0
 
@@ -482,11 +650,10 @@ def finish_netfx48(args):
     if not px.ready(prefix) or not library.is_file() or not library.resolve().is_relative_to(prefix) \
             or overrides.get("mscoree", "").lower() != "native":
         die("finish-netfx48 requires an existing Framework64 runtime with mscorlib.dll and a native mscoree override")
-    relative, recorded = protected_install(prefix)
+    relative, marked = protected_install(prefix)
     install = install_path(prefix, relative)
-    if recorded and not (unchanged(install, recorded["install_tree"])
-                         or accept_update(prefix, recorded, recorded.get("program"))):
-        die("recorded install folder changed")
+    if marked and not unchanged(install, marked["install_tree"]):
+        refuse(prefix, "its install folder changed since setup recorded it; run ./setup first")
     version = registry_values(prefix, r"Software\Wine").get("version")
     if version == "win10" and all(overrides.get(dll) == "builtin" for dll in NETFX48_BUILTINS):
         print("plugin runtime configuration already applied; nothing changed")
@@ -499,7 +666,7 @@ def finish_netfx48(args):
         for dll in NETFX48_BUILTINS:
             step(["reg", "add", "HKCU\\Software\\Wine\\DllOverrides", "/v", dll,
                                                   "/t", "REG_SZ", "/d", "builtin", "/f"])
-    windows(runner_dir, prefix, relative, builtins)
+    windows(runner_dir, prefix, relative, builtins, record=marked or None)
     print("plugin runtime configuration applied")
     return 0
 

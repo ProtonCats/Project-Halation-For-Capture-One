@@ -4,7 +4,9 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +48,7 @@ class Setup(unittest.TestCase):
         self.registry = {("HKCU\\Software\\Wine\\Direct3D", "OldValue"): "old"}
         self.types = {}
         self.tamper, self.fail_step = None, False
+        self.fail_at = self.tamper_program = None
         self.install_files = {}
         self.enterContext(patch.object(st.px.shutil, "which", return_value="available"))
         self.enterContext(patch.object(st.px.subprocess, "run", side_effect=self.process))
@@ -108,6 +111,10 @@ class Setup(unittest.TestCase):
                     self.registry["installer_path"] = str(path)
                     self.registry["at_install"] = list(self.events)
         self.events.append(stage)
+        if stage == self.fail_at:
+            return subprocess.CompletedProcess(cmd, 9)
+        if self.tamper_program and cmd[0] != "umu-run":
+            self.put_program(self.tamper_program)
         if stage == self.tamper:
             (self.install / "program.dll").write_bytes(b"tampered")
             if self.fail_step:
@@ -255,8 +262,7 @@ class Setup(unittest.TestCase):
         self.assertEqual(self.events, [])
         self.assertIn("already applied; nothing changed", self.output.getvalue())
         (self.install / "program.dll").write_bytes(b"external change")
-        with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
-            self.apply()
+        self.refused("names no program")
         self.assertEqual(self.events, [])
 
     def test_dry_run_prints_a_plan_and_writes_nothing(self):
@@ -317,15 +323,38 @@ class Setup(unittest.TestCase):
                 self.assert_pristine_refusal("inside the prefix|forbidden|unknown profile fields")
                 self.profile = original
 
-    def versioned(self):
+    def versioned(self, version=(1, 0, 0, 0)):
         """Apply the profile with a program whose version is 1.0.0.0."""
         self.profile["program"] = "bin/app.exe"
         self.write_profile()
         self.assertEqual(self.apply(), 0, self.errors.getvalue())
-        self.put_program((1, 0, 0, 0))
+        self.put_program(version)
         record = json.loads(self.marker.read_text())
         st.write_marker(self.prefix, {**record, "install_tree": st.snapshot(self.install), "program": "bin/app.exe",
-                                      "program_version": "1.0.0.0"})
+                                      "program_version": ".".join(map(str, version))})
+
+    def refused(self, reason):
+        """apply stops over a finished prefix: it says why, says to keep it, and writes nothing in it."""
+        before = {p.name: p.read_bytes() for p in self.prefix.iterdir() if p.is_file()}
+        with self.assertRaises(SystemExit) as stop:
+            self.apply()
+        message = str(stop.exception.code)
+        self.assertIn(reason, message)
+        self.assertIn(f"{self.prefix} was left as it is", message)
+        self.assertIn("Keep it", message)
+        self.assertNotIn("remove", message.lower())
+        self.assertEqual({p.name: p.read_bytes() for p in self.prefix.iterdir() if p.is_file()}, before)
+
+    def running(self):
+        """A real process of the prefix, until the test ends or stop() is called."""
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                 env={**os.environ, "WINEPREFIX": str(self.prefix)})
+        def stop():
+            if not child.stdin.closed:
+                child.stdin.close()
+                child.wait(10)
+        self.addCleanup(stop)
+        return stop
 
     def put_program(self, version, extra=b""):
         path = self.install / "bin/app.exe"
@@ -374,8 +403,9 @@ class Setup(unittest.TestCase):
                     self.put_program((1, 0, 0, 0), extra=b"patched")
                 else:
                     path.write_bytes(b"changed")
-                with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
-                    self.apply()
+                self.refused({"other file": "version of its program stayed 1.0.0.0", "program bytes": "version of its program stayed 1.0.0.0",
+                              "program gone": "its program bin/app.exe is missing",
+                              "program unreadable": "the version of its program cannot be read"}[change])
                 self.assertEqual(self.marker.read_bytes(), before)
                 path.unlink(missing_ok=True) if saved is None else path.write_bytes(saved)
 
@@ -386,8 +416,7 @@ class Setup(unittest.TestCase):
             record.pop(field)
         st.write_marker(self.prefix, record)
         (self.install / "extra.dll").write_bytes(b"changed")
-        with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
-            self.apply()
+        self.refused("its program did not")
         self.put_program((3, 1, 0, 0))
         self.assertEqual(self.apply(), 0, self.errors.getvalue())
         self.assertIn("the app updated itself: an earlier version to 3.1.0.0", self.output.getvalue())
@@ -408,8 +437,173 @@ class Setup(unittest.TestCase):
         other.write_bytes(pe((9, 0, 0, 0)))
         path.unlink()
         path.symlink_to(other)
-        with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
+        self.refused("the version of its program cannot be read")
+
+    def test_only_the_recorded_program_can_show_an_update(self):
+        self.versioned()
+        before = self.marker.read_bytes()
+        (self.install / "tool.exe").write_bytes(pe((5, 0, 0, 0)))
+        (self.install / "program.dll").write_bytes(b"patched")
+        self.profile["program"] = "tool.exe"
+        self.write_profile()
+        self.refused("version of its program stayed 1.0.0.0")
+        self.assertEqual(self.marker.read_bytes(), before)
+
+    def test_a_program_named_in_another_spelling_is_the_same_file(self):
+        self.versioned()
+        st.write_marker(self.prefix, {**json.loads(self.marker.read_text()), "program": "./bin//app.exe"})
+        self.put_program((2, 0, 0, 0))
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0", self.output.getvalue())
+
+    def test_a_program_that_went_back_is_refused_by_both_versions(self):
+        self.versioned((1, 9, 0, 0))
+        self.put_program((1, 8, 99, 0))
+        self.refused("went back from 1.9.0.0 to 1.8.99.0")
+        self.put_program((1, 10, 0, 0))
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertIn("the app updated itself: 1.9.0.0 to 1.10.0.0", self.output.getvalue())
+
+    def test_an_unchanged_folder_fills_in_what_an_earlier_marker_lacks(self):
+        self.versioned()
+        record = json.loads(self.marker.read_text())
+        st.write_marker(self.prefix, {k: record[k] for k in ("profile_sha256", "install_dir", "install_tree")})
+        self.events = []
+        stop = self.running()
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        stop()
+        filled = json.loads(self.marker.read_text())
+        self.assertEqual(filled, record)
+        self.assertEqual(self.events, [])
+        self.put_program((1, 0, 0, 0), extra=b"patched")
+        self.refused("version of its program stayed 1.0.0.0")
+        self.put_program((1, 0, 0, 0))
+        before = self.marker.read_bytes()
+        self.assertEqual(self.apply(), 0)
+        self.assertEqual(self.marker.read_bytes(), before)
+
+    def test_a_folder_that_is_still_changing_is_not_recorded(self):
+        self.versioned()
+        self.put_program((2, 0, 0, 0))
+        before, real, looks = self.marker.read_bytes(), st.snapshot, []
+        def snapshot(path):
+            tree = real(path)
+            looks.append(path)
+            (self.install / f"copying-{len(looks)}.dll").write_bytes(b"more")
+            return tree
+        with patch.object(st, "snapshot", side_effect=snapshot), self.assertRaises(SystemExit) as stop:
             self.apply()
+        self.assertIn("still changing", str(stop.exception.code))
+        self.assertEqual(self.marker.read_bytes(), before)
+
+    def test_the_version_counts_only_from_the_bytes_the_snapshot_records(self):
+        self.versioned()
+        self.put_program((1, 0, 0, 0), extra=b"half")
+        before = self.marker.read_bytes()
+        with patch.object(st.peversion, "program_version", return_value=("2.0.0.0", "0" * 64)):
+            self.refused("the version of its program cannot be read")
+        self.assertEqual(self.marker.read_bytes(), before)
+
+    def test_nothing_is_recorded_or_applied_while_the_app_runs(self):
+        self.versioned()
+        stop = self.running()
+        with self.subTest("nothing to do"):
+            self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        with self.subTest("a changed profile"):
+            self.profile["registry"][0]["data"] = 0
+            self.write_profile()
+            self.events = []
+            self.refused("close the app and run setup again")
+            self.assertEqual(self.events, [])
+        with self.subTest("an updated app"):
+            self.put_program((2, 0, 0, 0))
+            self.refused("close the app and run setup again")
+        stop()
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(json.loads(self.marker.read_text())["program_version"], "2.0.0.0")
+
+    def test_a_file_that_vanishes_while_the_folder_is_read_is_named(self):
+        self.versioned()
+        with patch.object(st.treehash, "snapshot", side_effect=FileNotFoundError(2, "gone", "app.tmp")):
+            self.refused("a file vanished while its install folder was read")
+        with patch.object(st.treehash, "snapshot", side_effect=PermissionError(13, "denied", "app.exe")):
+            self.refused("its install folder cannot be read")
+
+    def test_an_app_that_starts_during_a_download_stops_the_change(self):
+        self.versioned()
+        self.second_prerequisite()
+        data, stops = self.payloads["https://example.invalid/second.exe"], []
+        def download(url, **kwargs):
+            stops.append(self.running())
+            return io.BytesIO(data)
+        self.write_profile()
+        self.events, before = [], self.marker.read_bytes()
+        commands, real = [], self.process
+        def process(cmd, **kwargs):
+            commands.append(Path(cmd[0]).name)
+            return real(cmd, **kwargs)
+        with patch.object(st.urllib.request, "build_opener", return_value=SimpleNamespace(open=download)), \
+                patch.object(st.px.subprocess, "run", side_effect=process), \
+                self.assertRaisesRegex(SystemExit, "close the app and run setup again"):
+            self.apply()
+        stops[0]()
+        self.assertEqual((commands, self.marker.read_bytes()), ([], before))
+
+    def test_a_change_that_cannot_be_remembered_still_names_itself(self):
+        self.versioned()
+        self.tamper_program = (2, 0, 0, 0)
+        self.profile["registry"][0]["data"] = 0
+        real = st.write_marker
+        def write(prefix, record):
+            if "refused" in record:
+                raise OSError(28, "No space left on device")
+            real(prefix, record)
+        with patch.object(st, "write_marker", side_effect=write), \
+                self.assertRaisesRegex(SystemExit, "changed during a Windows step.*No space left"):
+            self.reapply()
+
+    def test_a_restored_folder_clears_the_note_without_a_profile_change(self):
+        self.versioned()
+        record = json.loads(self.marker.read_text())
+        st.write_marker(self.prefix, {**record, "refused": {"program.dll": None}})
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        self.assertEqual(json.loads(self.marker.read_text()), record)
+
+    def test_an_unreadable_runner_record_is_named(self):
+        self.versioned()
+        profile, runner = st.load_profile(self.profile_file.read_bytes()), self.prefix / st.px.MARKER
+        runner.write_text("{")
+        with self.assertRaisesRegex(st.Refused, "its runner record .runner.json cannot be read"):
+            st.examine(self.prefix, profile, "", self.runner)
+
+    def test_an_unreadable_record_names_the_one_before_it(self):
+        self.versioned()
+        for text in ("", "{", "[]", "{}", '{"profile_sha256": 1}', '{"profile_sha256": "", "install_dir": "x", "install_tree": {}}',
+                     *(json.dumps({**json.loads(self.marker.read_text()), **odd}) for odd in
+                       ({"program_version": "new"}, {"program_version": 2}, {"refused": []}, {"prerequisites": {}}))):
+            with self.subTest(text=text[:40]):
+                self.marker.write_text(text)
+                self.refused(f"its record {st.MARKER} cannot be read; the one before it is in {st.PREVIOUS}")
+
+    def test_the_marker_is_flushed_and_the_one_before_it_kept(self):
+        self.versioned()
+        before, synced = self.marker.read_bytes(), []
+        real = os.fsync
+        def fsync(fd):
+            synced.append(os.readlink(f"/proc/self/fd/{fd}"))
+            return real(fd)
+        with patch.object(st.os, "fsync", side_effect=fsync):
+            st.write_marker(self.prefix, {**json.loads(before), "example": 1})
+        self.assertEqual((self.prefix / st.PREVIOUS).read_bytes(), before)
+        self.assertEqual(json.loads(self.marker.read_text())["example"], 1)
+        self.assertEqual(synced[-1], str(self.prefix))
+        self.assertEqual(len([p for p in synced if Path(p).name.startswith(".setup-")]), 2)
+        outside = self.root / "outside"
+        outside.write_bytes(b"keep")
+        (self.prefix / st.PREVIOUS).unlink()
+        (self.prefix / st.PREVIOUS).symlink_to(outside)
+        st.write_marker(self.prefix, json.loads(before))
+        self.assertEqual(outside.read_bytes(), b"keep")
 
     def reapply(self, *extra):
         self.write_profile()
@@ -503,25 +697,90 @@ class Setup(unittest.TestCase):
         before = self.marker.read_bytes()
         install = self.profile["install_dir"]
         self.profile["install_dir"] = "drive_c/Program Files/Elsewhere"
-        with self.assertRaisesRegex(SystemExit, "moved its install folder"):
-            self.reapply()
+        self.write_profile()
+        self.events = []
+        self.refused("it is installed in drive_c/Program Files/Example")
         self.profile["install_dir"] = install
         self.assertEqual(self.marker.read_bytes(), before)
         self.assertEqual(self.events, [])
 
-    def test_a_failed_or_tampering_update_keeps_the_old_marker_and_is_repeated(self):
+    def test_a_failed_profile_change_is_marked_and_repeated(self):
         self.assertEqual(self.apply(), 0)
-        before = self.marker.read_bytes()
+        before, old_profile = json.loads(self.marker.read_text()), json.loads(json.dumps(self.profile))
         self.profile["registry"][0]["data"] = 0
-        self.tamper = "registry"
+        self.profile["dll_overrides"]["graphics"] = "native"
+        self.fail_at = "registry"
+        with self.assertRaises((SystemExit, RuntimeError)):
+            self.reapply()
+        self.fail_at = None
+        after = json.loads(self.marker.read_text())
+        self.assertEqual((after["profile_sha256"], after["shape"]), ("", None))
+        self.assertEqual(after["install_tree"], before["install_tree"])
+        self.assertEqual(self.registry["HKCU\\Software\\Wine\\DllOverrides", "graphics"], "native")
+        with self.subTest("going back to the old profile sets its values again"):
+            self.profile = old_profile
+            self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+            self.assertEqual(self.registry["HKCU\\Software\\Wine\\DllOverrides", "graphics"], "builtin")
+            self.assertEqual(self.reapply(), 0)
+            self.assertEqual(self.events, [])
+
+    def test_the_marker_vouches_for_nothing_while_windows_steps_run(self):
+        self.assertEqual(self.apply(), 0)
+        seen, real = [], self.process
+        def process(cmd, **kwargs):
+            if Path(cmd[0]).name == "wine":
+                record = json.loads(self.marker.read_text())
+                seen.append((record["profile_sha256"], record["shape"]))
+            return real(cmd, **kwargs)
+        self.profile["registry"][0]["data"] = 0
+        with patch.object(st.px.subprocess, "run", side_effect=process):
+            self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(set(seen), {("", None)})
+        self.assertEqual(json.loads(self.marker.read_text())["shape"], st.shape(st.load_profile(self.profile_file.read_bytes())))
+
+    def test_a_change_a_step_caused_is_never_an_update(self):
+        self.versioned()
+        self.tamper_program = (2, 0, 0, 0)
+        self.profile["registry"][0]["data"] = 0
         with self.assertRaisesRegex(SystemExit, "install folder changed during a Windows step"):
             self.reapply()
-        self.assertEqual(self.marker.read_bytes(), before)
-        (self.install / "program.dll").write_bytes(b"installed")
-        self.tamper = None
+        self.tamper_program = None
+        for _ in range(2):
+            self.refused("as a Halation step left it")
+        (self.install / "extra.log").write_bytes(b"the app wrote this")
+        self.refused("as a Halation step left it")
+        self.put_program((3, 0, 0, 0))
         self.assertEqual(self.reapply(), 0, self.errors.getvalue())
-        self.assertIn("registry", self.events)
-        self.assertNotEqual(self.marker.read_bytes(), before)
+        self.assertIn("the app updated itself: 1.0.0.0 to 3.0.0.0", self.output.getvalue())
+        self.assertNotIn("refused", json.loads(self.marker.read_text()))
+
+    def test_a_restored_folder_is_accepted_after_a_step_changed_it(self):
+        self.versioned()
+        saved = (self.install / "bin/app.exe").read_bytes()
+        self.tamper_program = (2, 0, 0, 0)
+        self.profile["registry"][0]["data"] = 0
+        with self.assertRaisesRegex(SystemExit, "install folder changed during a Windows step"):
+            self.reapply()
+        self.tamper_program = None
+        (self.install / "bin/app.exe").write_bytes(saved)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertNotIn("refused", json.loads(self.marker.read_text()))
+
+    def test_a_step_that_removes_a_file_is_remembered_too(self):
+        self.versioned()
+        (self.install / "program.dll").write_bytes(b"installed")
+        real = self.process
+        def process(cmd, **kwargs):
+            result = real(cmd, **kwargs)
+            if Path(cmd[0]).name == "wine":
+                (self.install / "program.dll").unlink(missing_ok=True)
+            return result
+        self.profile["registry"][0]["data"] = 0
+        with patch.object(st.px.subprocess, "run", side_effect=process), \
+                self.assertRaisesRegex(SystemExit, "install folder changed during a Windows step"):
+            self.reapply()
+        self.put_program((2, 0, 0, 0))
+        self.refused("program.dll")
 
     def test_a_marker_of_the_published_version_takes_a_changed_profile(self):
         self.assertEqual(self.apply(), 0)
@@ -549,8 +808,9 @@ class Setup(unittest.TestCase):
         before = self.marker.read_bytes()
         (self.install / "program.dll").write_bytes(b"changed")
         self.profile["registry"][0]["data"] = 0
-        with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
-            self.reapply()
+        self.write_profile()
+        self.events = []
+        self.refused("names no program")
         self.assertEqual(self.events, [])
         self.assertEqual(self.marker.read_bytes(), before)
 
@@ -562,6 +822,121 @@ class Setup(unittest.TestCase):
         self.assertEqual((self.events, self.marker.read_bytes()), ([], before))
         self.assertIn("registry HKCU", self.output.getvalue())
         self.assertNotIn("run local installer", self.output.getvalue())
+
+    def test_a_dry_run_of_an_app_update_writes_nothing(self):
+        self.versioned()
+        self.put_program((2, 0, 0, 0))
+        before = st.treehash.snapshot(self.root)
+        for change in (None, "registry", "environment"):
+            with self.subTest(change=change):
+                if change == "registry":
+                    self.profile["registry"][0]["data"] = 0
+                elif change:
+                    self.profile["environment"] = {"EXAMPLE_SETTING": "1"}
+                self.write_profile()
+                before = st.treehash.snapshot(self.root)
+                self.assertEqual(self.reapply("--dry-run"), 0, self.errors.getvalue())
+                self.assertEqual(st.treehash.compare(self.root, before), [])
+                self.assertEqual(self.events, [])
+                self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0 (1 files changed); its folder would be recorded",
+                              self.output.getvalue())
+
+    def test_a_dry_run_says_what_it_would_do_for_a_launch_setting_and_an_old_marker(self):
+        self.versioned()
+        record = json.loads(self.marker.read_text())
+        st.write_marker(self.prefix, {k: record[k] for k in ("profile_sha256", "install_dir", "install_tree")})
+        before = self.marker.read_bytes()
+        self.assertEqual(self.reapply("--dry-run"), 0)
+        self.assertEqual(self.marker.read_bytes(), before)
+        self.profile["environment"] = {"EXAMPLE_SETTING": "1"}
+        st.write_marker(self.prefix, record)
+        before = self.marker.read_bytes()
+        self.assertEqual(self.reapply("--dry-run"), 0)
+        self.assertEqual(self.marker.read_bytes(), before)
+        self.assertIn("launch settings", self.output.getvalue())
+
+    def second_prerequisite(self, name="second.exe", data=b"second"):
+        url = f"https://example.invalid/{name}"
+        self.payloads[url] = data
+        self.profile["prerequisites"].append({"name": name, "url": url, "args": ["/quiet"], "sha256": hashlib.sha256(data).hexdigest()})
+
+    def test_an_update_that_lands_during_a_download_is_not_mixed_into_the_record(self):
+        self.versioned()
+        self.second_prerequisite()
+        real = self.payloads["https://example.invalid/second.exe"]
+        def download(url, **kwargs):
+            self.put_program((2, 0, 0, 0))
+            return io.BytesIO(real)
+        with patch.object(st.urllib.request, "build_opener", return_value=SimpleNamespace(open=download)):
+            self.write_profile()
+            self.events = []
+            with self.assertRaisesRegex(SystemExit, "changed after it was checked"):
+                self.apply()
+        self.assertEqual(self.events, [])
+        record = json.loads(self.marker.read_text())
+        self.assertEqual(record["program_version"], "1.0.0.0")
+        self.assertNotIn("refused", record)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        record = json.loads(self.marker.read_text())
+        self.assertEqual(record["program_version"], "2.0.0.0")
+        self.assertTrue(st.unchanged(self.install, record["install_tree"]))
+        self.assertEqual(self.events.count("prerequisite"), 1)
+
+    def test_a_launch_only_change_checks_the_folder_before_it_writes(self):
+        self.versioned()
+        self.profile["environment"] = {"EXAMPLE_SETTING": "1"}
+        self.write_profile()
+        before = self.marker.read_bytes()
+        with patch.object(st.px, "in_use", side_effect=lambda prefix: self.put_program((2, 0, 0, 0))), \
+                self.assertRaisesRegex(SystemExit, "changed after it was checked"):
+            self.apply()
+        self.assertEqual(self.marker.read_bytes(), before)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(json.loads(self.marker.read_text())["program_version"], "2.0.0.0")
+
+    def test_a_prerequisite_that_ran_is_not_repeated_after_a_later_step_failed(self):
+        self.assertEqual(self.apply(), 0)
+        self.second_prerequisite()
+        self.fail_at = "registry"
+        with self.assertRaises((SystemExit, RuntimeError)):
+            self.reapply()
+        self.assertEqual(self.events.count("prerequisite"), 1)
+        self.fail_at = None
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertNotIn("prerequisite", self.events)
+
+    def test_a_prerequisite_that_ran_once_stays_recorded(self):
+        self.assertEqual(self.apply(), 0)
+        first = list(self.profile["prerequisites"])
+        self.second_prerequisite()
+        both = list(self.profile["prerequisites"])
+        for wanted in (both, first, both):
+            self.profile["prerequisites"] = wanted
+            self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertNotIn("prerequisite", self.events)
+        self.assertEqual([item["name"] for item in json.loads(self.marker.read_text())["prerequisites"]],
+                         ["runtime.exe", "second.exe"])
+
+    def test_a_known_version_is_never_replaced_by_none(self):
+        self.versioned()
+        (self.install / "plain.exe").write_bytes(b"no version")
+        st.write_marker(self.prefix, {**json.loads(self.marker.read_text()), "install_tree": st.snapshot(self.install)})
+        self.profile["program"] = "plain.exe"
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        record = json.loads(self.marker.read_text())
+        self.assertEqual((record["program"], record["program_version"]), ("bin/app.exe", "1.0.0.0"))
+        (self.install / "extra.exe").write_bytes(pe((4, 0, 0, 0)))
+        st.write_marker(self.prefix, {**record, "install_tree": st.snapshot(self.install)})
+        self.profile["program"] = "extra.exe"
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        record = json.loads(self.marker.read_text())
+        self.assertEqual((record["program"], record["program_version"]), ("extra.exe", "4.0.0.0"))
+
+    def test_a_profile_whose_program_is_not_there_is_refused(self):
+        self.versioned()
+        self.profile["program"] = "bin/renamed.exe"
+        self.write_profile()
+        self.refused("the program bin/renamed.exe is not in its install folder")
 
     def test_an_update_records_the_runner_that_made_it(self):
         self.assertEqual(self.apply(), 0)

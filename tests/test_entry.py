@@ -7,12 +7,15 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from core import entry as en
 from tests.test_peversion import pe
+
+REAL_APPLY = en.profiles.main
 
 
 class Entry(unittest.TestCase):
@@ -39,6 +42,7 @@ class Entry(unittest.TestCase):
         self.stdout = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.stderr = self.enterContext(contextlib.redirect_stderr(io.StringIO()))
         self.forbid_work = False
+        self.program = b"program"
 
     def put(self, path, data):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,9 +82,11 @@ class Entry(unittest.TestCase):
             pfx = arg("--prefix")
             self.put(pfx / "system.reg", b'"ProgramFilesDir"="C:\\\\Program Files"')
             install = pfx / "drive_c/Program Files/Example"
-            self.put(install / "bin/app.exe", b"program")
-            self.put(pfx / en.profiles.MARKER, json.dumps({"profile_sha256": en.runner.sha256(self.profile),
-                     "install_dir": "drive_c/Program Files/Example", "install_tree": en.profiles.snapshot(install)}).encode())
+            self.put(install / "bin/app.exe", self.program)
+            profile = en.profiles.load_profile(self.profile.read_bytes())
+            record = en.profiles.applied_record({"install_dir": profile["install_dir"], "install_tree": en.profiles.snapshot(install)},
+                                                profile, en.runner.sha256(self.profile))
+            self.put(pfx / en.profiles.MARKER, json.dumps(en.profiles.with_version(record, install, profile)).encode())
         return 0
 
     def setup(self):
@@ -110,9 +116,9 @@ class Entry(unittest.TestCase):
     def test_resume_checks_each_step_once_and_progress_is_live(self):
         self.assertEqual(self.setup(), 0)
         self.forbid_work = True
-        with patch.object(en.profiles, "unchanged", wraps=en.profiles.unchanged) as unchanged:
+        with patch.object(en.profiles, "snapshot", wraps=en.profiles.snapshot) as snapshot:
             self.assertEqual(self.setup(), 0)
-        self.assertEqual(unchanged.call_count, 1)
+        self.assertEqual(snapshot.call_count, 1)
         import shutil
         shutil.rmtree(self.data / "runners/patched")
         self.forbid_work = False
@@ -157,26 +163,139 @@ class Entry(unittest.TestCase):
         self.assertEqual(self.setup(), 2)
         self.assertTrue(self.base.exists())
 
-    def test_a_finished_prefix_is_never_named_for_removal(self):
-        self.assertEqual(self.setup(), 0)
-        self.forbid_work = True
-        marker = self.data / "pfx" / en.profiles.MARKER
-        for path, bad in ((marker, b"{}"), (marker, b""), (self.profile, json.dumps({"install_dir": "drive_c/Elsewhere"}).encode()),
-                          (self.data / "pfx/system.reg", b""), (self.data / "pfx/.runner.json", b'{"stamp": 900, "runner": "newer"}'),
-                          (self.data / "pfx/drive_c/Program Files/Example/bin/app.exe", b"changed")):
-            with self.subTest(path=path.name, bad=bad[:12]):
+    def refusal(self):
+        """What ./setup says when it stops over a finished prefix; it has written nothing and never advises removal."""
+        self.forbid_work, before = True, self.tree()
+        self.stderr.truncate(0)
+        self.stderr.seek(0)
+        self.assertEqual(self.setup(), 2)
+        self.assertEqual(self.tree(), before)
+        message = self.stderr.getvalue()
+        self.assertNotIn("remove", message)
+        self.assertIn(f"{self.data / 'pfx'} was left as it is", message)
+        self.assertIn("Keep it: it holds the installed app, its settings and its activation", message)
+        return message
+
+    def finished(self, version=(1, 0, 0, 0)):
+        """A finished prefix whose program carries a version."""
+        self.program = pe(version)
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        return self.data / "pfx", self.data / "pfx/drive_c/Program Files/Example/bin/app.exe"
+
+    def test_a_finished_prefix_is_kept_and_each_state_names_its_reason(self):
+        pfx, program = self.finished()
+        marker, runner = pfx / en.profiles.MARKER, pfx / ".runner.json"
+        def profile(**change):
+            return json.dumps({"install_dir": "drive_c/Program Files/Example", "program": "bin/app.exe", **change}).encode()
+        cases = ((marker, b"{}", "its record .setup.json cannot be read"), (marker, b"", "its record .setup.json cannot be read"),
+                 (self.profile, profile(install_dir="drive_c/Elsewhere"), "an installed app is never moved"),
+                 (self.profile, profile(program="bin/renamed.exe"), "the program bin/renamed.exe is not in its install folder"),
+                 (pfx / "system.reg", b"", "its registry (system.reg) is missing"),
+                 (runner, b'{"stamp": 900, "runner": "Release-9"}', "last used by Release-9, newer than Release-1"),
+                 (runner, b"{", "its runner record .runner.json cannot be read"),
+                 (program, None, "its program bin/app.exe is missing"),
+                 (program, b"half", "the version of its program cannot be read"),
+                 (program, pe((1, 0, 0, 0), extra=b"patched"), "version of its program stayed 1.0.0.0"),
+                 (program, pe((0, 9, 0, 0)), "its program went back from 1.0.0.0 to 0.9.0.0"),
+                 (program.parent / "extra.dll", b"new", "version of its program stayed 1.0.0.0"))
+        for path, data, reason in cases:
+            with self.subTest(reason=reason, path=path.name):
                 original = path.read_bytes() if path.exists() else None
-                path.write_bytes(bad)
-                before = self.tree()
-                self.stderr.truncate(0)
-                self.stderr.seek(0)
-                self.assertEqual(self.setup(), 2)
-                self.assertNotIn("remove", self.stderr.getvalue())
-                self.assertIn(f"{self.data / 'pfx'} is not as setup left it", self.stderr.getvalue())
-                self.assertIn("Keep it", self.stderr.getvalue())
-                self.assertEqual(self.tree(), before)
+                path.unlink() if data is None else path.write_bytes(data)
+                self.assertIn(reason, self.refusal())
                 path.unlink() if original is None else path.write_bytes(original)
         self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+
+    def test_other_states_of_a_finished_prefix_name_their_reason_too(self):
+        pfx, program = self.finished()
+        with self.subTest("a file vanishes"), patch.object(en.profiles.treehash, "snapshot", side_effect=FileNotFoundError(2, "x", "app.tmp")):
+            self.assertIn("a file vanished while its install folder was read (app.tmp)", self.refusal())
+        with self.subTest("an unreadable folder"), patch.object(en.profiles, "differing", side_effect=OSError("unexpected")):
+            self.assertIn("it could not be checked: unexpected", self.refusal())
+        with self.subTest("an app that runs"):
+            child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                     env={**os.environ, "WINEPREFIX": str(pfx)})
+            program.write_bytes(pe((2, 0, 0, 0)))
+            self.assertIn("close the app and run setup again", self.refusal())
+            program.write_bytes(pe((1, 0, 0, 0)))
+            self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+            child.stdin.close()
+            child.wait(10)
+        with self.subTest("a linked prefix"):
+            pfx.rename(self.data / "elsewhere")
+            pfx.symlink_to(self.data / "elsewhere")
+            self.assertIn("it is not as setup left it", self.refusal())
+
+    def test_the_check_records_nothing_itself(self):
+        pfx, program = self.finished()
+        program.write_bytes(pe((2, 0, 0, 0)))
+        before, calls = self.tree(), []
+        with patch.object(en.profiles, "main", side_effect=lambda args: calls.append(args[0]) or 0):
+            self.assertEqual(self.setup(), 2)
+        self.assertEqual((calls, self.tree()), (["apply"], before))
+        self.assertIn(f"{pfx} changed again while setup ran; run setup again", self.stderr.getvalue())
+        with patch.object(en.profiles, "main", return_value=3):
+            self.assertEqual(self.setup(), 2)
+        self.assertIn("prefix failed with exit 3\n", self.stderr.getvalue())
+        self.assertNotIn("remove", self.stderr.getvalue())
+
+    def wine(self, command, **kwargs):
+        """A Wine that only notes what it was asked to run."""
+        self.ran.append([Path(command[0]).name, *command[1:]])
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def real_apply(self):
+        """Let ./setup reach the real apply command, over a fake Wine."""
+        self.put(self.data / "runners/patched/files/bin/wine", b"wine")
+        self.ran = []
+        self.enterContext(patch.object(en.profiles, "main", side_effect=REAL_APPLY))
+        self.enterContext(patch.object(en.prefix.subprocess, "run", side_effect=self.wine))
+
+    def test_setup_takes_an_app_update_and_a_changed_profile_to_the_real_apply(self):
+        pfx, program = self.finished()
+        self.real_apply()
+        data = pe((1, 1, 0, 0))
+        program.write_bytes(data)
+        self.profile.write_text(json.dumps({**json.loads(self.profile.read_text()), "registry": [
+            {"key": "HKCU\\Software\\Wine\\Example", "name": "Value", "type": "REG_SZ", "data": "1"}]}))
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertIn("the app updated itself: 1.0.0.0 to 1.1.0.0 (1 files changed)", self.stdout.getvalue())
+        self.assertIn("profile updated in place", self.stdout.getvalue())
+        self.assertRegex(self.stdout.getvalue(), r"prefix: complete")
+        self.assertEqual(self.ran, [["wine", "winecfg", "-v", "win10"],
+                                    ["wine", "reg", "add", "HKCU\\Software\\Wine\\Example", "/v", "Value", "/t", "REG_SZ", "/d", "1", "/f"],
+                                    ["wineserver", "-w"]])
+        self.assertEqual(program.read_bytes(), data)
+        record = json.loads((pfx / en.profiles.MARKER).read_text())
+        self.assertEqual((record["program_version"], record["profile_sha256"]), ("1.1.0.0", en.runner.sha256(self.profile)))
+        self.ran.clear()
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertEqual(self.ran, [])
+        self.assertIn("prefix: verified, skipped", self.stdout.getvalue())
+
+    def test_setup_fills_in_a_marker_of_the_published_version(self):
+        pfx, program = self.finished()
+        self.real_apply()
+        marker = pfx / en.profiles.MARKER
+        record = json.loads(marker.read_text())
+        marker.write_text(json.dumps({k: record[k] for k in ("profile_sha256", "install_dir", "install_tree")}))
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertEqual(json.loads(marker.read_text()), record)
+        self.assertEqual(self.ran, [])
+
+    def test_a_full_disk_reports_itself(self):
+        pfx, program = self.finished()
+        self.real_apply()
+        program.write_bytes(pe((2, 0, 0, 0)))
+        before = self.tree()
+        with patch.object(en.profiles.os, "replace", side_effect=OSError(28, "No space left on device")), \
+                self.assertRaises(SystemExit) as stop:
+            self.setup()
+        self.assertIn("No space left on device", str(stop.exception.code))
+        self.assertNotIn("remove", str(stop.exception.code) + self.stderr.getvalue())
+        self.assertEqual(self.tree(), before)
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0", self.stdout.getvalue())
 
     def test_an_unfinished_prefix_is_still_named_for_removal(self):
         self.assertEqual(self.setup(), 0)
@@ -205,22 +324,6 @@ class Entry(unittest.TestCase):
                                             "windows_version": "win11"}))
         (self.data / "pfx/drive_c/Program Files/Example/bin/app.exe").write_bytes(b"changed")
         self.forbid_work = True
-        self.assertEqual(self.setup(), 2)
-        self.assertNotIn("remove", self.stderr.getvalue())
-
-    def test_an_app_update_does_not_ask_to_remove_the_prefix(self):
-        self.assertEqual(self.setup(), 0)
-        program = self.data / "pfx/drive_c/Program Files/Example/bin/app.exe"
-        marker = self.data / "pfx" / en.profiles.MARKER
-        program.write_bytes(pe((1, 0, 0, 0)))
-        marker.write_text(json.dumps({**json.loads(marker.read_text()), "program": "bin/app.exe", "program_version": "1.0.0.0",
-                                      "install_tree": en.profiles.snapshot(program.parents[1])}))
-        self.forbid_work = True
-        program.write_bytes(pe((2, 0, 0, 0)))
-        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
-        self.assertIn("the app updated itself: 1.0.0.0 to 2.0.0.0 (1 files changed)", self.stdout.getvalue())
-        self.assertNotIn("remove", self.stderr.getvalue())
-        program.write_bytes(pe((2, 0, 0, 0), extra=b"patched"))
         self.assertEqual(self.setup(), 2)
         self.assertNotIn("remove", self.stderr.getvalue())
 

@@ -32,10 +32,10 @@ class Outdated(Exception):
     """A finished step whose inputs changed since; its action brings it up to date."""
 
 
-def partial(folder):
+def partial(folder, reason="it is not as setup left it"):
+    """Stop over a step that is not complete; a finished prefix is never named for removal."""
     if os.path.lexists(folder / profiles.MARKER):
-        raise ValueError(f"{folder} is not as setup left it, for example after the app updated itself. Nothing was changed. "
-                         "Keep it: it holds the installed app, its settings and its activation. Start the app with ./run")
+        profiles.refuse(folder, reason)
     raise ValueError(f"incomplete or changed step; remove {folder} before retrying")
 
 
@@ -55,8 +55,10 @@ def completed(folder, check):
             partial(folder)
     except Outdated:
         return False
-    except (OSError, ValueError, KeyError, TypeError, SystemExit, struct.error, AttributeError):
-        partial(folder)
+    except profiles.Refused:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, SystemExit, struct.error, AttributeError) as error:
+        partial(folder, f"it could not be checked: {error}")
     return True
 
 
@@ -76,7 +78,8 @@ def setup_main(argv=None):
             raise ValueError("a local installer file is required")
         data = data_directory(args.data)
         pins = json.loads(PINS.read_bytes())
-        profile = profiles.load_profile(PROFILE.read_bytes())
+        raw = PROFILE.read_bytes()
+        profile, digest = profiles.load_profile(raw), hashlib.sha256(raw).hexdigest()
         base = data / "runners" / pins.get("ge_asset", pins["ge_tag"])
         work, assembled, pfx = data / "runner-work", data / "runners/patched", data / "pfx"
         patches = runner.our_patches()
@@ -132,13 +135,9 @@ def setup_main(argv=None):
                 and runner.sha256(assembled / "proton") == proton["sha256"]
 
         def applied():
-            marker = json.loads((pfx / profiles.MARKER).read_bytes())
-            executable(pfx, profile)
-            if not (prefix.ready(pfx) and prefix.forward_ok(pfx, prefix.runner_version(assembled)[0])
-                    and (profiles.unchanged(profiles.install_path(pfx, profile["install_dir"]), marker["install_tree"])
-                         or profiles.accept_update(pfx, marker, profile.get("program")))):
+            if not os.path.lexists(pfx / profiles.MARKER):
                 return False
-            if marker["profile_sha256"] != runner.sha256(PROFILE):
+            if profiles.examine(pfx, profile, digest, assembled).outdated:
                 raise Outdated
             return True
 
@@ -172,9 +171,13 @@ def setup_main(argv=None):
                 skipped = checked[index] if index in checked else completed(folder, check)
                 if not skipped:
                     code = action(command)
+                    finished = os.path.lexists(folder / profiles.MARKER)
                     if code:
-                        raise ValueError(f"{name} failed with exit {code}; remove {folder} before retrying")
+                        advice = "" if finished else f"; remove {folder} before retrying"
+                        raise ValueError(f"{name} failed with exit {code}{advice}")
                     if not completed(folder, check):
+                        if finished:
+                            raise ValueError(f"{folder} changed again while setup ran; run setup again")
                         partial(folder)
             except BaseException:
                 print(f"{name}: failed ({time.monotonic() - start:.1f}s)", file=sys.stderr)
