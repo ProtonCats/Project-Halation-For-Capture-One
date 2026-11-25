@@ -18,7 +18,9 @@ Prerequisites use HTTPS; redirects must also be listed in the profile.
 Profiles cannot supply installer URLs or authentication/licensing directives.
 All prerequisites are verified before prefix creation. Only the installer may create
 an absent install_dir; every existing install tree is immutable. Completed profiles
-are recorded in .setup.json; changing a completed profile requires a fresh prefix.
+are recorded in .setup.json. A changed profile is applied to the existing prefix: its
+registry values, overrides, Windows version and new prerequisites; the installer does
+not run again, and a changed install_dir is refused.
 """
 import argparse
 import hashlib
@@ -337,6 +339,74 @@ def protected_install(prefix):
     return relative, recorded
 
 
+def configure(profile, items, paths):
+    """The Windows steps that shape a prefix: the given prerequisites, then version, overrides and registry values."""
+    def steps(step):
+        for item, path in zip(items, paths):
+            if runner.sha256(path) != item["sha256"]:
+                path.unlink()
+                die(f"checksum mismatch for {item['name']}")
+            step(program(path, item["args"]))
+        step(["winecfg", "-v", profile["windows_version"]])
+        for dll, mode in profile["dll_overrides"].items():
+            step(["reg", "add", "HKCU\\Software\\Wine\\DllOverrides", "/v", dll,
+                                                  "/t", "REG_SZ", "/d", "" if mode == "disabled" else mode, "/f"])
+        for item in profile["registry"]:
+            value = ["/v", item["name"]] if item["name"] else ["/ve"]
+            command = ["reg", "delete" if item["data"] is None else "add", item["key"]] + value
+            if item["data"] is not None:
+                command += ["/t", item["type"], "/d", str(item["data"])]
+            step(command + ["/f"], missing_ok=item["data"] is None)
+    return steps
+
+
+def announce(profile, items):
+    for item in items:
+        print(f"verify {item['url']} SHA-256 {item['sha256']}; run {item['name']} {item['args']}")
+    for dll, mode in profile["dll_overrides"].items():
+        print(f"override {dll}: {mode}")
+    for item in profile["registry"]:
+        print(f"registry {item['key']} {item['name']}: {item['type']} {item['data']!r}")
+
+
+def shape(profile):
+    """A digest of the settings that live in the prefix; launch settings are read at each run instead."""
+    return hashlib.sha256(json.dumps([profile["windows_version"], profile["dll_overrides"], profile["registry"]],
+                                     sort_keys=True).encode()).hexdigest()
+
+
+def applied_record(record, profile, digest):
+    return {**record, "profile_sha256": digest, "shape": shape(profile),
+            "prerequisites": [{"name": item["name"], "sha256": item["sha256"]} for item in profile["prerequisites"]]}
+
+
+def update_profile(args, profile, digest, record, cache):
+    """Apply a changed profile to a prefix whose install folder was just found unchanged."""
+    runner_dir, prefix, stamp, name = px.checked_runner(args)
+    relative = profile["install_dir"]
+    if record["install_dir"] != relative:
+        die("the profile moved its install folder; use a fresh prefix")
+    ran = [(item["name"], item["sha256"]) for item in record.get("prerequisites", [])]
+    items = [item for item in profile["prerequisites"] if (item["name"], item["sha256"]) not in ran]
+    if items or record.get("shape") != shape(profile):
+        print(f"update prefix {prefix}; set Windows version {profile['windows_version']}")
+        announce(profile, items)
+        if args.dry_run:
+            return 0
+        paths = prerequisites(items, cache)
+        px.record_runner(prefix, stamp, name)
+        windows(runner_dir, prefix, relative, configure(profile, items, paths))
+    elif args.dry_run:
+        return 0
+    record = applied_record(record, profile, digest)
+    if profile.get("program"):
+        record.update(program=profile["program"],
+                      program_version=program_version(install_path(prefix, relative), profile["program"]))
+    write_marker(prefix, record)
+    print("profile updated in place; the app and its folder were not touched")
+    return 0
+
+
 def program(path, args):
     return (["msiexec", "/i", str(path)] if path.suffix.lower() == ".msi" else [str(path)]) + args
 
@@ -360,42 +430,23 @@ def apply(args):
         die("unsafe setup metadata location")
     if marker.exists():
         old = json.loads(marker.read_text())
-        if old["profile_sha256"] != digest:
-            die("a different profile is already applied; use a fresh prefix")
+        if old["profile_sha256"] != digest and old["install_dir"] != relative:
+            die("the profile moved its install folder; use a fresh prefix")
         if not px.ready(prefix) or not (unchanged(install, old["install_tree"])
                                         or accept_update(prefix, old, profile.get("program"))):
             die("recorded install folder changed or prefix is not ready")
+        if old["profile_sha256"] != digest:
+            return update_profile(args, profile, digest, json.loads(marker.read_text()), cache)
         print("profile already applied; nothing changed")
         return 0
-    for item in profile["prerequisites"]:
-        print(f"verify {item['url']} SHA-256 {item['sha256']}; run {item['name']} {item['args']}")
     print(f"create prefix {prefix}; set Windows version {profile['windows_version']}")
-    for dll, mode in profile["dll_overrides"].items():
-        print(f"override {dll}: {mode}")
-    for item in profile["registry"]:
-        print(f"registry {item['key']} {item['name']}: {item['type']} {item['data']!r}")
+    announce(profile, profile["prerequisites"])
     print(f"run local installer {installer} {profile['installer_args']}; snapshot {install}")
     if args.dry_run:
         return 0
     paths = prerequisites(profile["prerequisites"], cache)
     guarded(prefix, relative, lambda: px.create(args))
-    def configure(step):
-        for item, path in zip(profile["prerequisites"], paths):
-            if runner.sha256(path) != item["sha256"]:
-                path.unlink()
-                die(f"checksum mismatch for {item['name']}")
-            step(program(path, item["args"]))
-        step(["winecfg", "-v", profile["windows_version"]])
-        for dll, mode in profile["dll_overrides"].items():
-            step(["reg", "add", "HKCU\\Software\\Wine\\DllOverrides", "/v", dll,
-                                                  "/t", "REG_SZ", "/d", "" if mode == "disabled" else mode, "/f"])
-        for item in profile["registry"]:
-            value = ["/v", item["name"]] if item["name"] else ["/ve"]
-            command = ["reg", "delete" if item["data"] is None else "add", item["key"]] + value
-            if item["data"] is not None:
-                command += ["/t", item["type"], "/d", str(item["data"])]
-            step(command + ["/f"], missing_ok=item["data"] is None)
-    windows(runner_dir, prefix, relative, configure)
+    windows(runner_dir, prefix, relative, configure(profile, profile["prerequisites"], paths))
     codes = []
     command = program(installer, profile["installer_args"])
     for attempt in range(INSTALLER_RETRIES + 1):
@@ -413,7 +464,7 @@ def apply(args):
     final = snapshot(install_path(prefix, relative))
     if final is None:
         die("installer did not create install_dir")
-    record = {"profile_sha256": digest, "install_dir": relative, "install_tree": final}
+    record = applied_record({"install_dir": relative, "install_tree": final}, profile, digest)
     if profile.get("program"):
         record.update(program=profile["program"], program_version=program_version(install, profile["program"]))
     write_marker(prefix, record)
@@ -446,12 +497,12 @@ def finish_netfx48(args):
     if not (runner_dir / "files/bin/wine").is_file():
         die("runner has no files/bin/wine")
     px.record_runner(prefix, stamp, name)
-    def configure(step):
+    def builtins(step):
         step(["winecfg", "-v", "win10"])
         for dll in NETFX48_BUILTINS:
             step(["reg", "add", "HKCU\\Software\\Wine\\DllOverrides", "/v", dll,
                                                   "/t", "REG_SZ", "/d", "builtin", "/f"])
-    windows(runner_dir, prefix, relative, configure)
+    windows(runner_dir, prefix, relative, builtins)
     print("plugin runtime configuration applied")
     return 0
 

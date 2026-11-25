@@ -28,6 +28,10 @@ def data_directory(value):
     return (base / PROJECT_SLUG).resolve()
 
 
+class Outdated(Exception):
+    """A finished step whose inputs changed since; its action brings it up to date."""
+
+
 def partial(folder):
     if os.path.lexists(folder / profiles.MARKER):
         raise ValueError(f"{folder} is not as setup left it, for example after the app updated itself. Nothing was changed. "
@@ -49,6 +53,8 @@ def completed(folder, check):
     try:
         if folder.is_symlink() or not folder.is_dir() or not check():
             partial(folder)
+    except Outdated:
+        return False
     except (OSError, ValueError, KeyError, TypeError, SystemExit, struct.error, AttributeError):
         partial(folder)
     return True
@@ -128,10 +134,13 @@ def setup_main(argv=None):
         def applied():
             marker = json.loads((pfx / profiles.MARKER).read_bytes())
             executable(pfx, profile)
-            return (marker["profile_sha256"] == runner.sha256(PROFILE) and prefix.ready(pfx)
-                    and prefix.forward_ok(pfx, prefix.runner_version(assembled)[0])
+            if not (prefix.ready(pfx) and prefix.forward_ok(pfx, prefix.runner_version(assembled)[0])
                     and (profiles.unchanged(profiles.install_path(pfx, profile["install_dir"]), marker["install_tree"])
-                         or profiles.accept_update(pfx, marker, profile.get("program"))))
+                         or profiles.accept_update(pfx, marker, profile.get("program")))):
+                return False
+            if marker["profile_sha256"] != runner.sha256(PROFILE):
+                raise Outdated
+            return True
 
         steps = [
             ("fetch", base, fetched, runner.main, ["fetch", "--pins", str(PINS), "--dest", str(base.parent)]),

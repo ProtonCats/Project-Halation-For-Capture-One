@@ -184,6 +184,30 @@ class Entry(unittest.TestCase):
         self.assertEqual(self.setup(), 2)
         self.assertIn(f"remove {self.data / 'pfx'}", self.stderr.getvalue())
 
+    def test_a_changed_profile_goes_to_the_prefix_step_not_to_removal(self):
+        self.assertEqual(self.setup(), 0)
+        self.profile.write_text(json.dumps({"install_dir": "drive_c/Program Files/Example", "program": "bin/app.exe",
+                                            "windows_version": "win11"}))
+        calls = []
+        def stage(args):
+            calls.append(args[0])
+            return self.stage(args)
+        with patch.object(en.profiles, "main", side_effect=stage):
+            self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertEqual(calls, ["apply"])
+        self.assertNotIn("remove", self.stderr.getvalue())
+        self.forbid_work = True
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+
+    def test_a_changed_profile_over_a_changed_folder_is_still_refused(self):
+        self.assertEqual(self.setup(), 0)
+        self.profile.write_text(json.dumps({"install_dir": "drive_c/Program Files/Example", "program": "bin/app.exe",
+                                            "windows_version": "win11"}))
+        (self.data / "pfx/drive_c/Program Files/Example/bin/app.exe").write_bytes(b"changed")
+        self.forbid_work = True
+        self.assertEqual(self.setup(), 2)
+        self.assertNotIn("remove", self.stderr.getvalue())
+
     def test_an_app_update_does_not_ask_to_remove_the_prefix(self):
         self.assertEqual(self.setup(), 0)
         program = self.data / "pfx/drive_c/Program Files/Example/bin/app.exe"

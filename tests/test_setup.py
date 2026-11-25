@@ -411,6 +411,141 @@ class Setup(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
             self.apply()
 
+    def reapply(self, *extra):
+        self.write_profile()
+        self.events = []
+        self.output.truncate(0)
+        self.output.seek(0)
+        return self.apply(*extra)
+
+    def test_a_changed_profile_is_applied_in_place(self):
+        self.assertEqual(self.apply(), 0, self.errors.getvalue())
+        tree = st.snapshot(self.install)
+        self.profile["registry"][0]["data"] = 0
+        self.profile["registry"].append({"key": "HKCU\\Software\\Wine\\Fonts\\Replacements", "name": "Example UI",
+                                         "type": "REG_SZ", "data": "Example"})
+        self.profile["dll_overrides"]["graphics"] = "native"
+        self.profile["windows_version"] = "win11"
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertNotIn("installer", self.events)
+        self.assertNotIn("prerequisite", self.events)
+        self.assertNotIn("create", self.events)
+        self.assertEqual(self.registry["HKCU\\Software\\Microsoft\\Avalon.Graphics", "DisableHWAcceleration"], "0")
+        self.assertEqual(self.registry["HKCU\\Software\\Wine\\Fonts\\Replacements", "Example UI"], "Example")
+        self.assertEqual(self.registry["HKCU\\Software\\Wine\\DllOverrides", "graphics"], "native")
+        self.assertEqual(self.registry["version"], "win11")
+        self.assertEqual(st.snapshot(self.install), tree)
+        self.assertIn("profile updated in place", self.output.getvalue())
+        self.assertEqual(self.reapply(), 0)
+        self.assertEqual(self.events, [])
+        self.assertIn("nothing changed", self.output.getvalue())
+
+    def test_a_value_named_null_is_removed_in_place(self):
+        self.assertEqual(self.apply(), 0)
+        self.profile["registry"][0]["data"] = None
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertNotIn(("HKCU\\Software\\Microsoft\\Avalon.Graphics", "DisableHWAcceleration"), self.registry)
+
+    def test_a_launch_only_change_runs_no_windows_program(self):
+        self.assertEqual(self.apply(), 0)
+        before = json.loads(self.marker.read_text())
+        self.profile["environment"] = {"EXAMPLE_SETTING": "1"}
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.events, [])
+        after = json.loads(self.marker.read_text())
+        self.assertNotEqual(after["profile_sha256"], before["profile_sha256"])
+        self.assertEqual(after["install_tree"], before["install_tree"])
+
+    def test_only_new_prerequisites_run(self):
+        self.assertEqual(self.apply(), 0)
+        self.assertEqual(self.events.count("prerequisite"), 1)
+        url = "https://example.invalid/second.exe"
+        self.payloads[url] = b"second"
+        self.profile["prerequisites"].append({"name": "second.exe", "url": url, "args": ["/quiet"],
+                                              "sha256": hashlib.sha256(b"second").hexdigest()})
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.events.count("prerequisite"), 1)
+        self.assertNotIn("installer", self.events)
+        self.assertEqual(self.reapply(), 0)
+        self.assertEqual(self.events, [])
+        self.payloads[url] = b"third"
+        self.profile["prerequisites"][1]["sha256"] = hashlib.sha256(b"third").hexdigest()
+        (self.cache / "second.exe").unlink(missing_ok=True)
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.events.count("prerequisite"), 1)
+
+    def test_a_moved_install_folder_is_refused(self):
+        self.assertEqual(self.apply(), 0)
+        before = self.marker.read_bytes()
+        install = self.profile["install_dir"]
+        self.profile["install_dir"] = "drive_c/Program Files/Elsewhere"
+        with self.assertRaisesRegex(SystemExit, "moved its install folder"):
+            self.reapply()
+        self.profile["install_dir"] = install
+        self.assertEqual(self.marker.read_bytes(), before)
+        self.assertEqual(self.events, [])
+
+    def test_a_failed_or_tampering_update_keeps_the_old_marker_and_is_repeated(self):
+        self.assertEqual(self.apply(), 0)
+        before = self.marker.read_bytes()
+        self.profile["registry"][0]["data"] = 0
+        self.tamper = "registry"
+        with self.assertRaisesRegex(SystemExit, "install folder changed during a Windows step"):
+            self.reapply()
+        self.assertEqual(self.marker.read_bytes(), before)
+        (self.install / "program.dll").write_bytes(b"installed")
+        self.tamper = None
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertIn("registry", self.events)
+        self.assertNotEqual(self.marker.read_bytes(), before)
+
+    def test_a_marker_of_the_published_version_takes_a_changed_profile(self):
+        self.assertEqual(self.apply(), 0)
+        record = json.loads(self.marker.read_text())
+        st.write_marker(self.prefix, {k: record[k] for k in ("profile_sha256", "install_dir", "install_tree")})
+        self.profile["prerequisites"] = []
+        self.profile["registry"][0]["data"] = 0
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(self.registry["HKCU\\Software\\Microsoft\\Avalon.Graphics", "DisableHWAcceleration"], "0")
+
+    def test_an_app_update_and_a_changed_profile_both_take_effect(self):
+        self.versioned()
+        self.put_program((2, 0, 0, 0))
+        self.profile["registry"][0]["data"] = 0
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        record = json.loads(self.marker.read_text())
+        self.assertEqual(record["program_version"], "2.0.0.0")
+        self.assertTrue(st.unchanged(self.install, record["install_tree"]))
+        self.assertEqual(self.registry["HKCU\\Software\\Microsoft\\Avalon.Graphics", "DisableHWAcceleration"], "0")
+        self.assertEqual(self.reapply(), 0)
+        self.assertEqual(self.events, [])
+
+    def test_a_changed_install_folder_still_refuses_a_changed_profile(self):
+        self.assertEqual(self.apply(), 0)
+        before = self.marker.read_bytes()
+        (self.install / "program.dll").write_bytes(b"changed")
+        self.profile["registry"][0]["data"] = 0
+        with self.assertRaisesRegex(SystemExit, "recorded install folder changed"):
+            self.reapply()
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.marker.read_bytes(), before)
+
+    def test_a_dry_run_of_a_changed_profile_changes_nothing(self):
+        self.assertEqual(self.apply(), 0)
+        before = self.marker.read_bytes()
+        self.profile["registry"][0]["data"] = 0
+        self.assertEqual(self.reapply("--dry-run"), 0)
+        self.assertEqual((self.events, self.marker.read_bytes()), ([], before))
+        self.assertIn("registry HKCU", self.output.getvalue())
+        self.assertNotIn("run local installer", self.output.getvalue())
+
+    def test_an_update_records_the_runner_that_made_it(self):
+        self.assertEqual(self.apply(), 0)
+        (self.runner / "version").write_text("300 newer\n")
+        self.profile["registry"][0]["data"] = 0
+        self.assertEqual(self.reapply(), 0, self.errors.getvalue())
+        self.assertEqual(st.px.runner_history(self.prefix), {"stamp": 300, "runner": "newer"})
+
     def test_forward_only_rule_applies_before_downloads(self):
         self.prefix.mkdir()
         st.px.record_runner(self.prefix, 300, "newer")
