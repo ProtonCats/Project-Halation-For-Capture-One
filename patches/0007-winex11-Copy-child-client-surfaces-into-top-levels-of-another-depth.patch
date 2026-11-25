@@ -1,0 +1,302 @@
+SPDX-FileCopyrightText: 2026 ProtonCats and contributors
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+winex11.drv: Copy child client surfaces into top-levels of another depth.
+
+A child window that draws with OpenGL, Vulkan or Direct3D is composited:
+each present copies its client window into the top-level's X window.
+set_dc_drawable() told neither the DC nor the XRender layer which visual the
+drawable has, so both sides counted as the default visual. When the client
+window has 24 bits and the top-level the 32-bit ARGB visual, an unscaled copy
+went to XCopyArea, the X server answered BadMatch, and the process died.
+
+A top-level drawn by UpdateLayeredWindow() has that visual, in this process
+or another; 0008 also gives it to windows with a constant alpha.
+
+A window drawn by UpdateLayeredWindow() shows its bitmap only, so nothing is
+copied into it. For the others, read the visual from the X window itself,
+give both DCs its depth and format, and let the existing XRender conversion
+do the copy. It used to leave the alpha of such a copy at zero, which a
+compositor adds to what is behind; it now gets the window's constant alpha.
+Without XRender there is no conversion, and the copy is skipped.
+
+A visual that matches no XRender format, as the default one of a 30-bit
+screen, kept the format of the last drawable; the default visual now gets
+the root window's format.
+
+Free the clip region when the rectangle is empty.
+
+Shown with OpenGL by repro/p10-layered-child: --layer ulw with --target child
+and foreign, and with 0008 also --layer constant with them.
+
+Applies to: Valve Wine after GE's preparation (GE-Proton11-12 and 11-14), in order after 0006.
+The driver interface version is unchanged (111).
+
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -363,7 +363,8 @@
+     return FALSE;
+ }
+ 
+-void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode )
++void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode,
++                      const XVisualInfo *visual, int alpha )
+ {
+     struct x11drv_escape_set_drawable escape =
+     {
+@@ -371,7 +372,9 @@
+         .drawable = drawable,
+         .dc_rect = *rect,
+         .mode = mode,
++        .alpha = alpha,
+     };
++    if (visual) escape.visual = *visual;
+     NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+ }
+ 
+@@ -399,6 +402,7 @@
+ {
+     struct client_surface client;
+     XWindowChanges changes;
++    XVisualInfo visual;
+     Colormap colormap;
+     Window window;
+     RECT rect;
+@@ -406,6 +410,9 @@
+ 
+     HDC hdc_src;
+     HDC hdc_dst;
++    Window dst_window;         /* whole window that dst_visual describes */
++    XVisualInfo dst_visual;
++    int dst_alpha;
+     BOOL other_process;
+ 
+     BYTE *shape_age;
+@@ -553,7 +560,7 @@
+         UNICODE_STRING device_str = RTL_CONSTANT_STRING(displayW);
+         surface->hdc_dst = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
+         surface->hdc_src = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
+-        set_dc_drawable( surface->hdc_src, surface->window, &surface->rect, IncludeInferiors );
++        set_dc_drawable( surface->hdc_src, surface->window, &surface->rect, IncludeInferiors, &surface->visual, -1 );
+ #ifdef SONAME_LIBXCOMPOSITE
+         if (usexcomposite) pXCompositeRedirectWindow( gdi_display, surface->window, CompositeRedirectManual );
+ #endif
+@@ -926,14 +933,40 @@
+ #endif
+ }
+ 
++static int window_visual_error( Display *display, XErrorEvent *event, void *arg )
++{
++    return 1;
++}
++
++/* the visual of any window, our own or another process's; it never changes for a given X window */
++static BOOL get_window_visual( Window window, XVisualInfo *visual )
++{
++    XVisualInfo *list, wanted = {0};
++    XWindowAttributes attr;
++    BOOL ret = FALSE;
++    int count;
++
++    X11DRV_expect_error( gdi_display, window_visual_error, NULL );
++    ret = XGetWindowAttributes( gdi_display, window, &attr );
++    if (X11DRV_check_error() || !ret) return FALSE;
++
++    wanted.visualid = XVisualIDFromVisual( attr.visual );
++    if (!(list = XGetVisualInfo( gdi_display, VisualIDMask, &wanted, &count ))) return FALSE;
++    if ((ret = count > 0)) *visual = list[0];
++    XFree( list );
++    return ret;
++}
++
+ static void X11DRV_client_surface_present( struct client_surface *client, HDC hdc )
+ {
+     struct x11drv_client_surface *surface = impl_from_client_surface( client );
+     HWND hwnd = client->hwnd, toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
+     struct window_surface *win_surface;
+     struct x11drv_win_data *data;
++    DWORD layered_flags = 0;
+     RECT rect_dst, rect;
+     Drawable window;
++    BYTE alpha = 255;
+     HRGN region;
+ 
+     client_surface_update_geometry( hwnd, surface );
+@@ -972,6 +1005,13 @@
+         return;
+     }
+ 
++    if (NtUserGetWindowLongW( toplevel, GWL_EXSTYLE ) & WS_EX_LAYERED)
++    {
++        /* a window drawn by UpdateLayeredWindow() shows its bitmap only, never its child windows */
++        if (!NtUserGetLayeredWindowAttributes( toplevel, NULL, &alpha, &layered_flags ) && toplevel != hwnd) return;
++        if (!(layered_flags & LWA_ALPHA)) alpha = 255;
++    }
++
+     window = X11DRV_get_whole_window( toplevel );
+ 
+     if (toplevel == hwnd && NtUserGetPresentRect( toplevel, &rect_dst, -1 /* raw dpi */ ))
+@@ -985,7 +1025,7 @@
+         if (!NtUserGetClientRect( hwnd, &rect_dst, NtUserGetWinMonitorDpi( hwnd, MDT_WINE_RAW_DPI ) )) goto done;
+         NtUserMapWindowPoints( hwnd, toplevel, (POINT *)&rect_dst, 2, NtUserGetWinMonitorDpi( hwnd, MDT_WINE_RAW_DPI ) );
+     }
+-    if (IsRectEmpty( &rect_dst ) || IsRectEmpty( &surface->rect )) return;
++    if (IsRectEmpty( &rect_dst ) || IsRectEmpty( &surface->rect )) goto done;
+ 
+     if ((data = get_win_data( toplevel )))
+     {
+@@ -994,8 +1034,19 @@
+         release_win_data( data );
+     }
+ 
+-    if (get_dc_drawable( surface->hdc_dst, &rect ) != window || !EqualRect( &rect, &rect_dst ))
+-        set_dc_drawable( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
++    if (surface->dst_window != window)
++    {
++        surface->dst_window = get_window_visual( window, &surface->dst_visual ) ? window : None;
++        if (!surface->dst_window) goto done;
++    }
++    /* only XRender converts between depths */
++    if (surface->dst_visual.depth != surface->visual.depth && !xrender_funcs) goto done;
++
++    if (get_dc_drawable( surface->hdc_dst, &rect ) != window || !EqualRect( &rect, &rect_dst ) || surface->dst_alpha != alpha)
++    {
++        set_dc_drawable( surface->hdc_dst, window, &rect_dst, IncludeInferiors, &surface->dst_visual, alpha );
++        surface->dst_alpha = alpha;
++    }
+     if (region) NtGdiExtSelectClipRgn( surface->hdc_dst, region, RGN_COPY );
+ 
+     if (update_layered_overlay_shape( surface, toplevel ))
+@@ -1099,6 +1150,7 @@
+     }
+ 
+     if (!surface->window && !(surface->window = create_client_window( hwnd, surface->rect, &visual, colormap ))) goto failed;
++    surface->visual = surface->other_process ? default_visual : visual;
+ 
+     TRACE( "Created %s for client window %lx\n", debugstr_client_surface( &surface->client ), surface->window );
+     *client = &surface->client;
+@@ -1142,6 +1194,7 @@
+                     const struct x11drv_escape_set_drawable *data = in_data;
+                     physDev->dc_rect = data->dc_rect;
+                     physDev->drawable = data->drawable;
++                    if (data->visual.visual) physDev->depth = data->visual.depth;
+                     XFreeGC( gdi_display, physDev->gc );
+                     physDev->gc = XCreateGC( gdi_display, physDev->drawable, 0, NULL );
+                     XSetGraphicsExposures( gdi_display, physDev->gc, False );
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -1344,7 +1344,7 @@
+     pglXQueryDrawable( gdi_display, gl->drawable, GLX_WIDTH, (unsigned int *)width );
+     pglXQueryDrawable( gdi_display, gl->drawable, GLX_HEIGHT, (unsigned int *)height );
+     SetRect( &rect, 0, 0, *width, *height );
+-    set_dc_drawable( hdc, gl->drawable, &rect, IncludeInferiors );
++    set_dc_drawable( hdc, gl->drawable, &rect, IncludeInferiors, NULL, -1 );
+ 
+     *drawable = &gl->base;
+     return TRUE;
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -3554,6 +3554,7 @@
+     escape.code = X11DRV_SET_DRAWABLE;
+     escape.mode = IncludeInferiors;
+     escape.drawable = 0;
++    escape.alpha = -1;
+ 
+     escape.dc_rect.left         = win_rect->left - top_rect->left;
+     escape.dc_rect.top          = win_rect->top - top_rect->top;
+@@ -3595,6 +3596,8 @@
+ 
+     escape.code = X11DRV_SET_DRAWABLE;
+     escape.drawable = root_window;
++    escape.visual = default_visual;
++    escape.alpha = -1;
+     escape.mode = IncludeInferiors;
+     escape.dc_rect = NtUserGetVirtualScreenRect( MDT_DEFAULT );
+     OffsetRect( &escape.dc_rect, -2 * escape.dc_rect.left, -2 * escape.dc_rect.top );
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -357,6 +357,7 @@
+     int                      mode;         /* ClipByChildren or IncludeInferiors */
+     RECT                     dc_rect;      /* DC rectangle relative to drawable */
+     XVisualInfo              visual;       /* X visual used by drawable, may be unspecified if no change is needed */
++    int                      alpha;        /* alpha that copies without one get in a 32-bit drawable, -1 to leave it clear */
+ };
+ 
+ struct x11drv_escape_get_drawable
+@@ -370,7 +371,8 @@
+ extern BOOL layered_overlay_shape_enabled(void);
+ extern BOOL layered_overlay_alpha_enabled(void);
+ extern BOOL layered_overlay_input_shape_enabled(void);
+-extern void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode );
++extern void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode,
++                             const XVisualInfo *visual, int alpha );
+ extern Drawable get_dc_drawable( HDC hdc, RECT *rect );
+ extern HRGN get_dc_monitor_region( HWND hwnd, HDC hdc );
+ extern Window x11drv_client_surface_create( HWND hwnd, BOOL raw, int format, struct client_surface **client );
+diff --git a/dlls/winex11.drv/xrender.c b/dlls/winex11.drv/xrender.c
+--- a/dlls/winex11.drv/xrender.c
++++ b/dlls/winex11.drv/xrender.c
+@@ -152,6 +152,7 @@
+     Picture            pict;
+     Picture            pict_src;
+     XRenderPictFormat *pict_format;
++    int                copy_alpha;  /* see x11drv_escape_set_drawable */
+ };
+ 
+ static inline struct xrender_physdev *get_xrender_dev( PHYSDEV dev )
+@@ -895,6 +896,7 @@
+     physdev->x11dev = x11dev;
+     physdev->cache_index = -1;
+     set_physdev_format( physdev, format );
++    physdev->copy_alpha = -1;
+     push_dc_driver( pdev, &physdev->dev, &xrender_funcs );
+     return TRUE;
+ }
+@@ -1001,10 +1003,16 @@
+                             break;
+                         }
+                     }
+-                    if (i == WXR_NB_FORMATS) WARN( "Format not found for drawable visual.\n" );
++                    if (i == WXR_NB_FORMATS)
++                    {
++                        /* do not keep the format of the previous drawable, which can have another depth */
++                        if (set->visual.visualid == default_visual.visualid) format = WXR_FORMAT_ROOT;
++                        else WARN( "Format not found for drawable visual.\n" );
++                    }
+                 }
+                 free_xrender_picture( physdev );
+                 set_physdev_format( physdev, format );
++                physdev->copy_alpha = set->alpha;
+             }
+             return ret;
+         }
+@@ -1673,13 +1681,24 @@
+     }
+     else /* color -> color (can be at different depths) or mono -> mono */
+     {
++        BOOL fade = physdev_dst->copy_alpha >= 0;
++
+         if (physdev_dst->pict_format->depth == 32 && physdev_src->pict_format->depth < 32)
+-            mask_pict = get_no_alpha_mask();
++        {
++            if (!fade) mask_pict = get_no_alpha_mask();
++            else
++            {
++                pthread_mutex_lock( &xrender_mutex );
++                mask_pict = get_mask_pict( physdev_dst->copy_alpha * 257 );
++            }
++        }
++        else fade = FALSE;
+ 
+         xrender_blit( PictOpSrc, src_pict, mask_pict, dst_pict,
+                       physdev_src->x11dev->dc_rect.left + src->x,
+                       physdev_src->x11dev->dc_rect.top + src->y,
+                       src->width, src->height, x_dst, y_dst, dst->width, dst->height, xscale, yscale );
++        if (fade) pthread_mutex_unlock( &xrender_mutex );
+     }
+ 
+     if (drawable) pXRenderFreePicture( gdi_display, dst_pict );

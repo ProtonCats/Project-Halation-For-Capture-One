@@ -18,6 +18,7 @@ namespace Probes
 
         public static void Begin(string name)
         {
+            File.Delete(ResultPath(name));  // a run that dies must not leave an earlier run's result
             Result["nonce"] = Environment.GetEnvironmentVariable("HALATION_NONCE") ?? "none";
             Result["probe"] = name;
             Result["os"] = Environment.OSVersion.VersionString;
@@ -26,14 +27,17 @@ namespace Probes
             Result["wine"] = WineVersion();
         }
 
-        public static string Write(string name)
+        static string ResultPath(string name)
         {
             string path = Environment.GetEnvironmentVariable("HALATION_RESULT");
-            if (string.IsNullOrEmpty(path))
-            {
-                string dir = Environment.GetEnvironmentVariable("ORACLE_OUT");
-                path = Path.Combine(string.IsNullOrEmpty(dir) ? "." : dir, name + ".json");
-            }
+            if (!string.IsNullOrEmpty(path)) return path;
+            string dir = Environment.GetEnvironmentVariable("ORACLE_OUT");
+            return Path.Combine(string.IsNullOrEmpty(dir) ? "." : dir, name + ".json");
+        }
+
+        public static string Write(string name)
+        {
+            string path = ResultPath(name);
             string tmp = path + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(Result, new JsonSerializerOptions { WriteIndented = true }) + "\n");
             File.Move(tmp, path, true);

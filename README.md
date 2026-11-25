@@ -201,6 +201,7 @@ The [reference](docs/reference.md) covers each step in detail: the runner build,
 | `0004` shell32 | `SHCreateItemWithParent` | `repro/p5b-dialog-com` |
 | `0005` mscms | The WCS default display profile lookups, so programs see the monitor's colour profile | `repro/p4-colour` |
 | `0006` winex11 | No crash when an input device disappears while Wine reads its button map | `repro/p1d-wpf-input` (device churn) |
+| `0007` winex11 | An OpenGL child of a layered window no longer ends the program, and is drawn with the window's alpha | `repro/p10-layered-child` |
 | `0008` winex11 | Constant layered alpha applied in the window surface, so helper windows are see-through on X11 | `repro/p8-layered-alpha` |
 | `0009` winewayland | The layered alpha survives a change of surface role on Wayland | `repro/p8-layered-alpha` |
 | `0010` winex11, winewayland | Near-invisible layered windows (constant alpha below 8) stay unmapped, so they take no pointer input and draw no blurred band | `repro/p8-layered-alpha` |
