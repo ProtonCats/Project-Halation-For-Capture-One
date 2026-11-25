@@ -145,7 +145,9 @@ git pull
 ./setup ~/Downloads/<the Capture One installer>.exe
 ```
 
-Setup checks every finished step. If an update changed one, setup stops and names the folder to remove; remove it and run setup again. If that folder is the prefix (`pfx`), first copy out any catalogs or sessions you saved inside it.
+Setup checks every finished step. If an update changed one, setup stops and names the folder to remove; remove it and run setup again. Setup never names a finished prefix (`pfx`) for removal.
+
+**Keep `pfx`.** It holds your installed Capture One, its settings and its activation. If setup says the prefix is not as it left it, for example after Capture One updated itself, leave it alone and start the app with `./run`.
 
 ### Removing
 
@@ -154,7 +156,8 @@ Everything Halation made is in `~/.local/share/halation-layer`, plus the `halati
 ### If something goes wrong
 
 - **`missing required tools: ...`**: install the tools it names (step 2), then run setup again.
-- **`... remove <folder> before retrying`**: delete that folder, then run setup again.
+- **`... remove <folder> before retrying`**: delete that folder, then run setup again. Never delete a finished prefix (`pfx`) for this.
+- **`... is not as setup left it`**: keep the folder and start the app with `./run`. If the app no longer starts, open an issue before removing anything.
 - **`a local installer file is required`**: the path after `./setup` must point to the installer `.exe`.
 - **"Open With plugin could not be enabled"** in Capture One: that plugin needs Microsoft's .NET Framework 4.8; see the [reference](docs/reference.md#optional-the-plugin-runtime).
 - **Anything else**: open an issue with the output of `./setup`; see [Contributing](#contributing).

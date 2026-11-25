@@ -6,7 +6,7 @@ How each piece of Halation works, for contributors and anyone curious. The front
 
 - **Data folder.** `$XDG_DATA_HOME/halation-layer`, or the local data directory `halation-layer` when that variable is unset; `--data <dir>` selects another location for both commands.
 - **Before starting**, setup checks the required build dependencies. It reports each step's time and skips steps it has already verified.
-- **A partial or changed step** is refused, naming the folder to remove before retrying.
+- **A partial or changed step** is refused, naming the folder to remove before retrying. A finished prefix is refused without that advice: it holds the app, its settings and its activation.
 - **Launch** checks the installed files before and after; arguments after `./run --` are passed to the program.
 
 ## Repro programs

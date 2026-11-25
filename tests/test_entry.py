@@ -138,8 +138,7 @@ class Entry(unittest.TestCase):
                  (self.data / "runner-work/.patched", b"old", self.data / "runner-work"),
                  (self.data / "runner-work/out/sample.dll", b"bad", self.data / "runner-work"),
                  (self.data / "runners/patched" / en.LIB / "sample.dll", b"changed", self.data / "runners/patched"),
-                 (self.data / "pfx/.setup.json", b"{}", self.data / "pfx"),
-                 (self.data / "pfx/drive_c/Program Files/Example/bin/app.exe", b"changed", self.data / "pfx")]
+                 ]
         self.forbid_work = True
         for path, bad, folder in cases:
             with self.subTest(path=path.relative_to(self.data)):
@@ -156,6 +155,33 @@ class Entry(unittest.TestCase):
         self.forbid_work = False
         self.assertEqual(self.setup(), 2)
         self.assertTrue(self.base.exists())
+
+    def test_a_finished_prefix_is_never_named_for_removal(self):
+        self.assertEqual(self.setup(), 0)
+        self.forbid_work = True
+        marker = self.data / "pfx" / en.profiles.MARKER
+        for path, bad in ((marker, b"{}"), (marker, b""), (self.profile, json.dumps({"install_dir": "drive_c/Elsewhere"}).encode()),
+                          (self.data / "pfx/system.reg", b""), (self.data / "pfx/.runner.json", b'{"stamp": 900, "runner": "newer"}'),
+                          (self.data / "pfx/drive_c/Program Files/Example/bin/app.exe", b"changed")):
+            with self.subTest(path=path.name, bad=bad[:12]):
+                original = path.read_bytes() if path.exists() else None
+                path.write_bytes(bad)
+                before = self.tree()
+                self.stderr.truncate(0)
+                self.stderr.seek(0)
+                self.assertEqual(self.setup(), 2)
+                self.assertNotIn("remove", self.stderr.getvalue())
+                self.assertIn(f"{self.data / 'pfx'} is not as setup left it", self.stderr.getvalue())
+                self.assertIn("Keep it", self.stderr.getvalue())
+                self.assertEqual(self.tree(), before)
+                path.unlink() if original is None else path.write_bytes(original)
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+
+    def test_an_unfinished_prefix_is_still_named_for_removal(self):
+        self.assertEqual(self.setup(), 0)
+        (self.data / "pfx" / en.profiles.MARKER).unlink()
+        self.assertEqual(self.setup(), 2)
+        self.assertIn(f"remove {self.data / 'pfx'}", self.stderr.getvalue())
 
     def test_preflight_refuses_missing_tools_before_work(self):
         self.forbid_work = True

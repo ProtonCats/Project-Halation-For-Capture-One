@@ -29,6 +29,9 @@ def data_directory(value):
 
 
 def partial(folder):
+    if os.path.lexists(folder / profiles.MARKER):
+        raise ValueError(f"{folder} is not as setup left it, for example after the app updated itself. Nothing was changed. "
+                         "Keep it: it holds the installed app, its settings and its activation. Start the app with ./run")
     raise ValueError(f"incomplete or changed step; remove {folder} before retrying")
 
 
