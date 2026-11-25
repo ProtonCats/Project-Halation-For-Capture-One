@@ -11,7 +11,7 @@ The app itself is never modified, and every Wine fix comes with a small program 
 
 - **Your install stays untouched.** Setup and every launch hash the install folder before and after. A changed file fails the run, except when the app's own program has a higher version, as after an update.
 - **Exports match Windows.** Three RAW files exported to TIFF on the CPU were pixel-identical to the same machine's Windows install: 0 differing pixels.
-- **Fixes, not workarounds.** Eleven Wine patches fix what the app trips over: colour profiles, file dialogs, input devices, helper windows and GPU-drawn windows. Each one has a repro program in `repro/`.
+- **Fixes, not workarounds.** Twelve Wine patches fix what the app trips over: colour profiles, file dialogs, input devices, helper windows and GPU-drawn windows. Each one has a repro program in `repro/`.
 - **Pinned and checked.** Setup downloads one pinned GE-Proton release, checks its published SHA-512 and refuses anything that does not match.
 - **Open to build on.** The generic parts live in `core/`, so the same layer can carry other Windows apps through their own profile.
 
@@ -169,7 +169,7 @@ Everything Halation made is in `~/.local/share/halation-layer`, plus the `halati
 
 ## How it works
 
-![The layer stack, drawn as a cross-section of colour film. From top: 1, Capture One, your licensed copy, never modified; 2, the Windows prefix, built by setup from the profile; 3, GE-Proton 11-12, upstream and pinned; 4, Halation's 11 Wine fixes as the anti-halation layer; 5, your Linux desktop as the base.](docs/layers.svg)
+![The layer stack, drawn as a cross-section of colour film. From top: 1, Capture One, your licensed copy, never modified; 2, the Windows prefix, built by setup from the profile; 3, GE-Proton 11-12, upstream and pinned; 4, Halation's 12 Wine fixes as the anti-halation layer; 5, your Linux desktop as the base.](docs/layers.svg)
 
 - **`setup`** fetches the pinned GE-Proton release, rebuilds only the Wine libraries that `patches/` changes, and lays them over the runner. It then creates one Windows prefix, applies the app's profile (Windows version, library overrides, a few registry values) and runs your installer silently.
 - **`run`** starts the app through `umu-run` with the profile's environment, passes the host's OpenCL drivers in, and checks the install folder before and after.
@@ -191,7 +191,7 @@ The [reference](docs/reference.md) covers each step in detail: the runner build,
 
 ## Wine patches
 
-![Contact sheet of the eleven Wine patches, one frame each with its component and the repro program that shows it; a twelfth open frame invites your fix. The table below lists the same patches as text.](docs/patches.svg)
+![Contact sheet of the twelve Wine patches, one frame each with its component and the repro program that shows it; a thirteenth open frame invites your fix. The table below lists the same patches as text.](docs/patches.svg)
 
 | Patch | What it fixes | Shown by |
 |---|---|---|
