@@ -6,7 +6,7 @@ How each piece of Halation works, for contributors and anyone curious. The front
 
 - **Data folder.** `$XDG_DATA_HOME/halation-layer`, or the local data directory `halation-layer` when that variable is unset; `--data <dir>` selects another location for both commands.
 - **Before starting**, setup checks the required build dependencies. It reports each step's time and skips steps it has already verified.
-- **A partial or changed step** is refused, naming the folder to remove before retrying. A finished prefix is refused without that advice: it holds the app, its settings and its activation.
+- **A partial or changed step** is refused, naming the folder to remove before retrying. A finished prefix never is: setup says why it left it as it is, because it holds the app, its settings and its activation.
 - **Launch** checks the installed files before and after; arguments after `./run --` are passed to the program.
 
 ## Repro programs
@@ -85,11 +85,32 @@ core/runner.py assemble --mode unix --pins core/runner/ge-proton11-12.json --wor
 The measured profile is `profiles/captureone/profile.json`; its setting notes are beside it. Setup applies the Windows version, DLL overrides and registry values before running the local installer:
 
 - **Registry directives** are limited to `HKCU\Software\Wine\` and `HKCU\Software\Microsoft\Avalon.Graphics` and its subkeys; authentication and licensing directives are refused.
-- **The install folder** is checked before and after every Windows step, and a change fails it. Only the initial installer may create an absent install folder.
+- **The install folder** is checked before and after every Windows step, and a change fails it. The change is noted, so the next setup does not take it for the app's own update. Only the initial installer may create an absent install folder.
 - **A failed installer** with the install folder still absent is retried once after 10 seconds with the same arguments; each attempt reports its exit code and duration. A second failure or a partial install refuses completion and asks for the prefix folder to be removed before running setup again.
-- **The record.** Setup then records its tree and the profile hash in `.setup.json`. Applying the same profile again changes nothing.
-- **A changed profile** is applied to the existing prefix: registry values, overrides, the Windows version and prerequisites that were not there before. The app's installer does not run again, and a value is removed by naming it with `null`. A profile that moves `install_dir` needs a fresh prefix.
-- **An app that updated itself** is recognised by its own version number. Setup prints the old and new version and records the new folder. A folder that changed while the version stayed the same is refused.
+- **The record.** Setup records the install tree, the profile's hash and settings, and the program's version in `.setup.json`. It is written in one step and flushed; the record before it stays beside it as `.setup.json.previous`. Applying the same profile again changes nothing.
+- **An earlier record** gets the fields it lacks at the next setup, once its folder is found unchanged.
+
+### A changed profile
+
+Setup applies the difference to the existing prefix: registry values, overrides, the Windows version and prerequisites that have not run there.
+
+- **What does not happen.** The app's installer does not run again, and a profile that moves `install_dir` is refused. A value the profile no longer names stays; naming it with `null` removes it.
+- **The app must be closed.** Setup looks for the prefix in the environment of your own processes and stops when one uses it.
+- **A change that fails** is repeated by the next setup, also when you have gone back to the old profile: until every step is done, the record says that no profile is applied. Prerequisites are recorded as they finish.
+
+### An app that updated itself
+
+Setup takes a changed install folder for the app's own update, prints both versions and records the new folder, when all of this holds:
+
+- **A higher version.** The recorded program is a regular file in the folder, and its version is higher than the recorded one, compared as numbers.
+- **The same bytes.** That version comes from the bytes the new record holds, and a second look at the whole folder and the version agrees.
+- **Nothing runs** in the prefix.
+
+Anything else is refused and left as it is, with its reason: the same or a lower version, a missing or unreadable program, or files one of setup's own steps changed.
+
+- **Once only:** a record made before versions were recorded, over a folder that has changed since, counts a changed program file instead.
+- **Not told apart:** an update that stopped after it replaced the program looks like a finished one. Finishing it later changes files under a recorded version, which is refused.
+- **Tested** with stand-in programs. No real app update has gone through it yet.
 
 ## Prefix and launch
 
@@ -100,7 +121,7 @@ The measured profile is `profiles/captureone/profile.json`; its setting notes ar
 
 Add `--profile profiles/captureone/profile.json` to `run` to apply its launch environment, including the web view's `--disable-gpu` argument. A profile without an `environment` entry leaves the launch environment unchanged; profiles cannot override names beginning with WINE, PROTON, UMU, DXVK or STEAM_COMPAT_, any variable set by the runner environment, or GAMEID, VKD3D_SHADER_CACHE_PATH, PATH, LD_PRELOAD and LD_LIBRARY_PATH.
 
-Profile launches also watch `install_dir`, resolved inside the prefix, before and after execution. A change exits 3; `--watch` overrides that directory.
+Profile launches also watch `install_dir`, resolved inside the prefix, before and after execution. A change exits 3, unless the app's program has a higher version afterwards: then `run` lists the changed paths, says that the app updated itself and returns the program's own exit code. `--watch` overrides that directory and has no such exception.
 
 **OpenCL at launch.** Proton runs programs in a runtime container that has no OpenCL driver list, so Wine's OpenCL would find no platform.
 
@@ -119,7 +140,7 @@ WINEPREFIX="<prefix>" WINE="<runner>/files/bin/wine" WINESERVER="<runner>/files/
 python3 core/setup.py finish-netfx48 --runner "<runner>" --prefix "<prefix>"
 ```
 
-The project never downloads or runs the runtime installer. `finish-netfx48` requires the existing framework files and a native `mscoree` override, then restores `win10` and builtin `uiautomationcore`, `dxva2` and `evr` without changing the install folder. Repeating it changes nothing.
+The project never downloads or runs the runtime installer. `finish-netfx48` requires the existing framework files and a native `mscoree` override, then restores `win10` and builtin `uiautomationcore`, `dxva2` and `evr` without changing the install folder. Repeating it changes nothing. After an app update, run `./setup` first.
 
 ## Display colour profile
 

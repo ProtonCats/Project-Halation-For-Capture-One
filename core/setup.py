@@ -17,10 +17,12 @@ start with HKCU\\Software\\Wine\\ or HKCU\\Software\\Microsoft\\Avalon.Graphics.
 Prerequisites use HTTPS; redirects must also be listed in the profile.
 Profiles cannot supply installer URLs or authentication/licensing directives.
 All prerequisites are verified before prefix creation. Only the installer may create
-an absent install_dir; every existing install tree is immutable. Completed profiles
-are recorded in .setup.json. A changed profile is applied to the existing prefix: its
-registry values, overrides, Windows version and new prerequisites; the installer does
-not run again, and a changed install_dir is refused.
+an absent install_dir; no step may change an existing one. Completed profiles are
+recorded in .setup.json, the record before in .setup.json.previous. A changed profile is
+applied to the existing prefix: its registry values, overrides, Windows version and new
+prerequisites; the installer does not run again, and a changed install_dir is refused.
+A changed folder is taken for the app's own update, and recorded, only when the recorded
+program has a higher version and nothing runs in the prefix. --dry-run writes nothing.
 """
 import argparse
 from collections import namedtuple

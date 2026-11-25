@@ -12,7 +12,8 @@ rewrites a newer prefix. A prefix counts as ready once its registry holds the Pr
 creation exits 1 by design, so exit codes decide nothing there. run starts the program with umu-run, the given
 runner and no runtime update, on X11; --watch hashes a directory before and after with treehash.py and fails the
 run when anything in it changed.
-With --profile, install_dir inside the prefix is watched by default; --watch overrides it.
+With --profile, install_dir inside the prefix is watched by default; --watch overrides it. There a change is accepted
+when the profile's program has a higher version afterwards: the app updated itself, and the next setup records it.
 """
 import argparse
 import fcntl

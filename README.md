@@ -9,7 +9,7 @@ Halation runs the Windows edition of Capture One on a Linux desktop, through Pro
 
 The app itself is never modified, and every Wine fix comes with a small program that shows the bug without Capture One.
 
-- **Your install stays untouched.** Setup and every launch hash the install folder before and after; one changed file fails the run.
+- **Your install stays untouched.** Setup and every launch hash the install folder before and after. A changed file fails the run, except when the app's own program has a higher version, as after an update.
 - **Exports match Windows.** Three RAW files exported to TIFF on the CPU were pixel-identical to the same machine's Windows install: 0 differing pixels.
 - **Fixes, not workarounds.** Eleven Wine patches fix what the app trips over: colour profiles, file dialogs, input devices, helper windows and GPU-drawn windows. Each one has a repro program in `repro/`.
 - **Pinned and checked.** Setup downloads one pinned GE-Proton release, checks its published SHA-512 and refuses anything that does not match.
@@ -145,11 +145,13 @@ git pull
 ./setup ~/Downloads/<the Capture One installer>.exe
 ```
 
-**When Capture One updates itself**, let it finish and start it again. The next `./setup` sees the new version, says so and records the new files.
+Setup checks every finished step. If an update of Halation changed a runner step, setup stops and names the folder to remove; remove it and run setup again.
 
-Setup checks every finished step. If an update changed one, setup stops and names the folder to remove; remove it and run setup again. Setup never names a finished prefix (`pfx`) for removal.
+**When Halation's profile changes**, close Capture One first. Setup applies the difference to the prefix you have: the installer does not run again and the app's files are not touched.
 
-**Keep `pfx`.** It holds your installed Capture One, its settings and its activation. If setup says the prefix is not as it left it, for example after Capture One updated itself, leave it alone and start the app with `./run`.
+**When Capture One updates itself**, let the update finish and close the app, then run `./setup`. It recognises an update by the program's higher version and records the new files. This has been tested with stand-in programs, not yet with a real Capture One update.
+
+**Keep `pfx`.** It holds your installed Capture One, its settings and its activation. Setup never names a finished prefix for removal. When it cannot accept one, it leaves it as it is and says why.
 
 ### Removing
 
@@ -159,7 +161,7 @@ Everything Halation made is in `~/.local/share/halation-layer`, plus the `halati
 
 - **`missing required tools: ...`**: install the tools it names (step 2), then run setup again.
 - **`... remove <folder> before retrying`**: delete that folder, then run setup again. Never delete a finished prefix (`pfx`) for this.
-- **`... is not as setup left it`**: keep the folder and start the app with `./run`. If the app no longer starts, open an issue before removing anything.
+- **`... was left as it is: ...`**: keep the folder. The text after the colon is the reason, for example that the app is open or an update is not finished. If the app no longer starts, open an issue before removing anything.
 - **`a local installer file is required`**: the path after `./setup` must point to the installer `.exe`.
 - **"Open With plugin could not be enabled"** in Capture One: that plugin needs Microsoft's .NET Framework 4.8; see the [reference](docs/reference.md#optional-the-plugin-runtime).
 - **Anything else**: open an issue with the output of `./setup`; see [Contributing](#contributing).
@@ -180,7 +182,7 @@ The [reference](docs/reference.md) covers each step in detail: the runner build,
 
 | | Rule | What it means | Enforced by |
 |---|---|---|---|
-| 1 | **The install folder is never modified** | Fixes live in the runner, the prefix or the launch environment, never in the app's files. | A hash of the install tree before and after every setup step and launch (`core/treehash.py`); a change fails the run. |
+| 1 | **The install folder is never modified** | Fixes live in the runner, the prefix or the launch environment, never in the app's files. | A hash of the install tree before and after every setup step and launch (`core/treehash.py`). A change fails it, except the app's own update during a launch, known by a higher program version. |
 | 2 | **Licensing is never touched** | Sign-in, trial, activation and machine checks run exactly as shipped. No code reads, emulates, skips or patches them. | Profile entries that touch authentication or licensing are refused (`core/setup.py`). |
 | 3 | **You bring the software** | Setup installs the copy you downloaded. Halation never downloads, mirrors or links it. | `./setup` takes a local installer and nothing else. |
 | 4 | **Every fix stands on its own** | Each Wine fix ships with a small Windows program that shows the bug without Capture One, so anyone can check it and report it to Wine. | `repro/`, one program per behaviour. |
