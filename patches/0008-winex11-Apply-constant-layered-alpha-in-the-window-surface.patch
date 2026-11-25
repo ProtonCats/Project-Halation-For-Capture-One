@@ -4,23 +4,105 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 winex11.drv: Apply constant layered alpha in the window surface.
 
 Use the ARGB visual for local, non-embedded LWA_ALPHA windows below
-full opacity when no colour key is requested. Premultiply a separate
-upload image, preserving the GDI backing pixels across repeated flushes.
+full opacity when no colour key is requested and XRender is available:
+without it the frames of 3D child windows cannot be copied into a 32-bit
+window. Premultiply a separate upload image, preserving the GDI backing
+pixels across repeated flushes.
 Reuse win32u's existing alpha_bits and full-surface invalidation when
 constant alpha changes. Do not change the driver interface.
 
 Delete _NET_WM_WINDOW_OPACITY on this path, including window recreation,
 so compositors honouring the hint do not apply the alpha a second time.
-Keep the existing opacity-hint fallback without ARGB or for embedded
-and foreign windows. Full opacity, attribute removal and colour-key
+Keep the existing opacity-hint fallback without ARGB or XRender, or for
+embedded and foreign windows. Full opacity, attribute removal and colour-key
 requests retain the default-visual path; UpdateLayeredWindow is unchanged.
 
-Applies to: Valve Wine fda79a5 (GE-Proton11-12) after GE's preparation, in order after 0006.
+A window that shows its own OpenGL, Vulkan or Direct3D frames keeps the
+default visual and the hint as well: the frames cover the surface and carry
+no alpha. The window's state is updated when such frames come or go.
+
+Applies to: Valve Wine fda79a5 (GE-Proton11-12) after GE's preparation, in order after 0007.
 The driver interface version is unchanged (111).
 
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -87,6 +87,14 @@
+     palette_size = X11DRV_PALETTE_Init();
+ 
+     stock_bitmap_pixmap = XCreatePixmap( gdi_display, root_window, 1, 1, 1 );
++}
++
++
++/* Only XRender copies between depths, which a 32-bit top-level needs for the frames of its 3D child windows. */
++BOOL xrender_available(void)
++{
++    pthread_once( &init_once, device_init );
++    return xrender_funcs != NULL;
+ }
+ 
+ 
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
 --- a/dlls/winex11.drv/window.c
 +++ b/dlls/winex11.drv/window.c
-@@ -2951,6 +2951,11 @@
+@@ -755,6 +755,32 @@
+ 
+ 
+ /***********************************************************************
++ *              use_constant_alpha
++ *
++ * Constant alpha goes into the surface of a 32-bit window, unless the window's own 3D frames cover that surface.
++ */
++BOOL use_constant_alpha( const struct x11drv_win_data *data, BOOL argb, BYTE alpha, DWORD flags )
++{
++    return argb && !data->embedded && !data->client_window && alpha != 255 &&
++           (flags & (LWA_ALPHA | LWA_COLORKEY)) == LWA_ALPHA;
++}
++
++
++/* the alpha moves between the surface and the opacity hint when the window's own 3D frames come or go */
++static void client_window_changed( struct x11drv_win_data *data )
++{
++    BOOL argb = argb_visual.visualid && xrender_available();
++    DWORD flags;
++    BYTE alpha;
++
++    if (!data->whole_window || layered_overlay_alpha_enabled()) return;
++    if (!NtUserGetLayeredWindowAttributes( data->hwnd, NULL, &alpha, &flags )) return;
++    if (use_constant_alpha( data, argb, alpha, flags ) == !data->use_alpha)
++        NtUserPostMessage( data->hwnd, WM_WINE_UPDATEWINDOWSTATE, 0, 0 );
++}
++
++
++/***********************************************************************
+  *              sync_window_text
+  */
+ static void sync_window_text( Display *display, Window win, const WCHAR *text )
+@@ -2755,6 +2781,7 @@
+     }
+ 
+     data->client_window = 0;
++    client_window_changed( data );
+ }
+ 
+ 
+@@ -2779,6 +2806,7 @@
+     set_wine_allow_flip( client_window, 1 );
+ 
+     data->client_window = client_window;
++    client_window_changed( data );
+ }
+ 
+ 
+@@ -2797,6 +2825,7 @@
+         {
+             if (data->whole_window) client_window_events_disable( data, client_window );
+             data->client_window = 0;
++            client_window_changed( data );
+         }
+         release_win_data( data );
+     }
+@@ -2951,6 +2980,11 @@
  
      /* set the window opacity */
      if (!NtUserGetLayeredWindowAttributes( data->hwnd, &key, &alpha, &layered_flags )) layered_flags = 0;
@@ -32,13 +114,17 @@ The driver interface version is unchanged (111).
      sync_window_opacity( data->display, data->whole_window, alpha, layered_flags );
      sync_window_input_shape( data );
  
-@@ -4032,7 +4037,14 @@
+@@ -4031,11 +4065,18 @@
+  */
+ void X11DRV_SetLayeredWindowAttributes( HWND hwnd, COLORREF key, BYTE alpha, DWORD flags )
+ {
++    BOOL argb = argb_visual.visualid && xrender_available();
+     struct x11drv_win_data *data = get_win_data( hwnd );
  
      if (data)
      {
 -        set_window_visual( data, &default_visual, FALSE );
-+        BOOL constant_alpha = !data->embedded && argb_visual.visualid && alpha != 255 &&
-+                              (flags & (LWA_ALPHA | LWA_COLORKEY)) == LWA_ALPHA;
++        BOOL constant_alpha = use_constant_alpha( data, argb, alpha, flags );
 +
 +        set_window_visual( data, constant_alpha ? &argb_visual : &default_visual, constant_alpha );
 +
@@ -48,6 +134,7 @@ The driver interface version is unchanged (111).
  
          if (data->whole_window)
          {
+diff --git a/dlls/winex11.drv/bitblt.c b/dlls/winex11.drv/bitblt.c
 --- a/dlls/winex11.drv/bitblt.c
 +++ b/dlls/winex11.drv/bitblt.c
 @@ -1585,6 +1585,7 @@
@@ -115,10 +202,11 @@ The driver interface version is unchanged (111).
          surface->image = image;
          surface->byteswap = byteswap;
          surface->window = window;
-@@ -1993,14 +2017,22 @@
+@@ -1993,14 +2017,24 @@
  {
      struct window_surface *previous;
      struct x11drv_win_data *data;
++    BOOL argb = argb_visual.visualid && xrender_available();
 +    DWORD flags = 0;
 +    BYTE alpha = 255;
 +    BOOL constant_alpha;
@@ -127,9 +215,10 @@ The driver interface version is unchanged (111).
  
      if (!(data = get_win_data( hwnd ))) return TRUE; /* use default surface */
 +    if (!NtUserGetLayeredWindowAttributes( hwnd, NULL, &alpha, &flags )) flags = 0;
-+    constant_alpha = !layered && !data->embedded && argb_visual.visualid && alpha != 255 &&
-+                     (flags & (LWA_ALPHA | LWA_COLORKEY)) == LWA_ALPHA;
++    constant_alpha = !layered && use_constant_alpha( data, argb, alpha, flags );
 +    if (constant_alpha) set_window_visual( data, &argb_visual, TRUE );
++    else if (!layered && data->client_window && data->use_alpha && (flags & LWA_ALPHA) && !layered_overlay_alpha_enabled())
++        set_window_visual( data, &default_visual, FALSE ); /* its own 3D frames came after the alpha */
      if ((previous = *surface) && previous->funcs == &x11drv_surface_funcs)
      {
          Window window = get_x11_surface(previous)->window;
@@ -139,7 +228,7 @@ The driver interface version is unchanged (111).
          /* re-create window surface is window has changed, which can happen when changing visual */
          TRACE( "re-creating hwnd %p surface with new window %lx\n", data->hwnd, data->whole_window );
      }
-@@ -2011,14 +2043,14 @@
+@@ -2011,14 +2045,14 @@
          data->layered = TRUE;
          if (!data->embedded && argb_visual.visualid) set_window_visual( data, &argb_visual, TRUE );
      }
@@ -156,3 +245,22 @@ The driver interface version is unchanged (111).
      set_surface_window_rects( *surface, &data->rects );
  
  done:
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -368,6 +368,7 @@
+ };
+ 
+ extern BOOL needs_offscreen_rendering( HWND hwnd );
++extern BOOL xrender_available(void);
+ extern BOOL layered_overlay_shape_enabled(void);
+ extern BOOL layered_overlay_alpha_enabled(void);
+ extern BOOL layered_overlay_input_shape_enabled(void);
+@@ -765,6 +766,7 @@
+ extern Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *visual, Colormap colormap );
+ extern void detach_client_window( struct x11drv_win_data *data, Window client_window );
+ extern void attach_client_window( struct x11drv_win_data *data, Window client_window );
++extern BOOL use_constant_alpha( const struct x11drv_win_data *data, BOOL argb, BYTE alpha, DWORD flags );
+ extern void destroy_client_window( HWND hwnd, Window client_window );
+ extern void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BOOL use_alpha );
+ extern void change_systray_owner( Display *display, Window systray_window );

@@ -35,6 +35,7 @@ How each piece of Halation works, for contributors and anyone curious. The front
 
 - `--layer none|constant|ulw` makes the window plain, layered with a constant alpha, or drawn by `UpdateLayeredWindow`; `--target self|child|foreign` draws on it, on its child, or on a child that a second process puts into it.
 - `--alphas 200,255,200` sets constant alphas in turn (default 200). `--expect opaque|faded|bitmap` demands one kind of pixel; otherwise a constant alpha may show either way, since some compositors apply it later.
+- On X11 `--expect faded` needs a compositor for `--target self`, and on unpatched Wine for the other two as well.
 - A run that dies in a present prints no result and leaves no result file. `0007` is the fix; `0008` makes constant-alpha windows reach the same copy.
 
 ## Building the runner
