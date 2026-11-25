@@ -123,7 +123,7 @@ A runner of another GE-Proton release sets some of the profile's values anew at 
 
 - **Setup notices** by that time and by when Wine noted it, recorded as `wine_inf` and `wine_inf_noted` in `.setup.json`; a copy of a prefix that does not keep file times gets its settings written once. It lets the runner update the prefix first, without a window, then writes the Windows version, overrides and registry values over it. Prerequisites do not run again, and the app must be closed.
 - **A record without the time** gets its settings written once.
-- **`./run`** says it in one line and starts as usual; `./setup` writes the settings again.
+- **`./run`** does the same before it starts the app, once, when nothing else changed, and says so first. If it cannot, it says why in one line and starts as usual; `./setup` then writes the settings again. A record without the time is left to `./setup` while the prefix carries the present runner's.
 
 ### An app that updated itself
 

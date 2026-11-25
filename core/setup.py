@@ -344,13 +344,33 @@ def written_over(runner_dir, prefix):
     return {"wine_inf": present, "wine_inf_noted": px.noted_inf(prefix)}
 
 
-def overwritten(prefix, runner_dir):
-    """Whether recorded settings were overwritten by a runner, or will be at the next start; a look that never fails."""
+def follow(prefix, runner_dir, raw, lock, say):
+    """For a launch: write the settings again when a runner set some of them anew, and say so.
+
+    Never fails, so that the app can start; what is not settings (a changed profile, a prerequisite, a changed folder) is
+    left to setup. A finished record without a time is of an earlier version and counts by what the prefix carries.
+    """
     try:
-        record = read_marker(prefix)
-    except Refused:
-        return False
-    return "wine_inf" in record and not settled(record, runner_dir, prefix)
+        profile, digest, record = load_profile(raw), hashlib.sha256(raw).hexdigest(), read_marker(prefix)
+        stamp, name = px.runner_version(runner_dir)
+        if record["profile_sha256"]:
+            record = {"wine_inf": px.inf_time(runner_dir), "wine_inf_noted": px.noted_inf(prefix), **record}
+        if settled(record, runner_dir, prefix) or not px.forward_ok(prefix, stamp):
+            return
+    except (Exception, SystemExit):
+        return
+    try:
+        with lock:
+            record = read_marker(prefix)
+            if record["profile_sha256"] not in ("", digest) or owed(profile, record):
+                raise ValueError("the profile changed as well")
+            refuse_running(prefix)
+            say("a runner set some settings anew; writing them again, this can take 15 seconds")
+            record = write_settings(runner_dir, prefix, stamp, name, profile, record)
+            write_marker(prefix, applied_record(record, profile, digest))
+        say("the settings are written again")
+    except (Exception, SystemExit) as error:
+        say(f"a runner set some settings anew; run ./setup to write them again ({error})")
 
 
 def filled(record, install, profile):
@@ -552,6 +572,12 @@ def recorded(items, before=()):
     return kept
 
 
+def owed(profile, record):
+    """The profile's prerequisites that have not run in the prefix."""
+    ran = recorded(record.get("prerequisites", []))
+    return [item for item in profile["prerequisites"] if recorded([item])[0] not in ran]
+
+
 def applied_record(record, profile, digest):
     record = {key: value for key, value in record.items() if key != "refused"}
     return {**record, "profile_sha256": digest, "shape": shape(profile),
@@ -592,8 +618,7 @@ def update_profile(args, profile, digest, record, cache):
     """Apply a changed profile, or one a runner overwrote, to a prefix whose install folder is the recorded one."""
     runner_dir, prefix, stamp, name = px.checked_runner(args)
     relative, install = record["install_dir"], install_path(prefix, record["install_dir"])
-    ran = recorded(record.get("prerequisites", []))
-    items = [item for item in profile["prerequisites"] if recorded([item])[0] not in ran]
+    items = owed(profile, record)
     anew = not settled(record, runner_dir, prefix)
     steps = items or anew or record.get("shape") != shape(profile)
     if steps:

@@ -836,36 +836,204 @@ class Entry(unittest.TestCase):
                 self.ran.clear()
                 self.assertEqual((self.setup(), self.ran), (0, []), self.stderr.getvalue())
 
-    def test_run_says_when_a_runner_set_the_settings_anew_and_starts(self):
-        self.assertEqual(self.setup(), 0)
-        pfx, inf = self.data / "pfx", self.data / "runners/patched/files/share/wine/wine.inf"
-        self.put(inf, b"the same in every release")
-        os.utime(inf, (1000, 1000))
-        self.put(pfx / ".update-timestamp", b"1000\n")
-        marker = pfx / en.profiles.MARKER
-        plain = {k: v for k, v in json.loads(marker.read_text()).items() if k != "wine_inf"}
-        cases = (("as recorded", 1000, b"1000", {"wine_inf": 1000}, False), ("a new runner", 2000, b"1000", {"wine_inf": 1000}, True),
-                 ("another runner was in it", 1000, b"1500", {"wine_inf": 1000}, True), ("a marker from before", 2000, b"1000", {}, False),
-                 ("another runner and this one again", 1000, b"1000", {"wine_inf": 1000, "wine_inf_noted": 1}, True),
-                 ("wine may not update it", 1000, b"disable", {"wine_inf": 1000}, False), ("no record", 2000, b"1000", None, False),
-                 ("an unreadable record", 2000, b"1000", "{", False))
-        for name, seconds, note, record, said in cases:
+    def launched(self, code=7):
+        """./run: what it says, with the Windows programs it ran in self.ran; the launch itself is stopped."""
+        self.ran.clear()
+        self.said.clear()
+        self.stderr.truncate(0)
+        self.stderr.seek(0)
+        with patch.object(en.prefix, "main", return_value=code) as start:
+            self.assertEqual(en.run_main(["--data", str(self.data)]), code)
+        self.assertEqual(start.call_count, 1)
+        return self.stderr.getvalue()
+
+    def follows(self):
+        """A finished prefix over a runner from second 1000, behind a fake Wine that notes the runner's time at each start."""
+        self.pfx, self.app = self.finished()
+        self.real_apply()
+        self.said = []
+        self.inf, self.note = self.data / "runners/patched/files/share/wine/wine.inf", self.pfx / ".update-timestamp"
+        self.put(self.inf, b"the same in every release")
+        os.utime(self.inf, (1000, 1000))
+        self.failing = None
+        def wine(cmd, **kwargs):
+            self.said.append(self.stderr.getvalue())
+            if Path(cmd[0]).name == "wine":
+                self.note.write_text(str(int(self.inf.stat().st_mtime)))
+            result = self.wine(cmd, **kwargs)
+            return subprocess.CompletedProcess(cmd, 9) if cmd[1] == self.failing else result
+        self.enterContext(patch.object(en.prefix.subprocess, "run", side_effect=wine))
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.installed = en.profiles.snapshot(self.pfx / "drive_c/Program Files/Example")
+        self.settings = [["wine", "winecfg", "-v", "win10"], ["wineserver", "-w"]]
+        self.updates = [["wine", "wineboot", "-u"], ["wineserver", "-w"]]
+
+    def record(self, **changes):
+        marker = self.pfx / en.profiles.MARKER
+        record = {**json.loads(marker.read_text()), **changes}
+        marker.write_text(json.dumps({key: value for key, value in record.items() if value != "gone"}))
+        return record
+
+    def test_run_writes_settings_a_runner_set_anew_and_starts(self):
+        self.follows()
+        self.assertEqual((self.launched(), self.ran), ("", []))
+        for name, seconds, note, gone, ran in (("a new runner", 2000, "1000", False, self.updates + self.settings),
+                                               ("a new runner that ran already", 3000, "3000", False, self.settings),
+                                               ("another runner was in it", 3000, "1500", False, self.updates + self.settings),
+                                               ("another runner was in it and this one again", 3000, "3000", False, self.settings),
+                                               ("a record from before, a new runner", 3500, "3000", True, self.updates + self.settings),
+                                               ("wine may not update it", 4000, "disable", False, None)):
             with self.subTest(name=name):
-                os.utime(inf, (seconds, seconds))
-                (pfx / ".update-timestamp").write_bytes(note)
-                marker.unlink(missing_ok=True)
-                if isinstance(record, dict):
-                    noted = {"wine_inf_noted": en.prefix.noted_inf(pfx)} if record else {}
-                    record = json.dumps({**plain, **noted, **record})
-                if record is not None:
-                    marker.write_text(record)
-                before = en.profiles.treehash.snapshot(pfx)
-                self.stderr.truncate(0)
-                self.stderr.seek(0)
-                with patch.object(en.prefix, "main", return_value=7):
-                    self.assertEqual(en.run_main(["--data", str(self.data)]), 7)
-                self.assertEqual("run ./setup to write them again" in self.stderr.getvalue(), said)
-                self.assertEqual(en.profiles.treehash.compare(pfx, before), [])
+                os.utime(self.inf, (seconds, seconds))
+                self.note.write_text(note)
+                if gone:
+                    self.record(wine_inf="gone", wine_inf_noted="gone")
+                if ran is None:  # the fake Wine would overwrite the note
+                    with patch.object(en.prefix.subprocess, "run", side_effect=self.wine):
+                        said = self.launched()
+                    ran = self.settings
+                else:
+                    said = self.launched()
+                self.assertEqual(self.ran, ran)
+                self.assertEqual(said, "run: a runner set some settings anew; writing them again, this can take 15 seconds\n"
+                                       "run: the settings are written again\n")
+                self.assertTrue(all("15 seconds" in text and "written again" not in text for text in self.said), self.said)
+                record = self.record()
+                self.assertEqual((record["wine_inf"], record["profile_sha256"]), (seconds, en.runner.sha256(self.profile)))
+                self.assertEqual(en.profiles.snapshot(self.pfx / "drive_c/Program Files/Example"), self.installed)
+                self.assertEqual((self.launched(), self.ran), ("", []))
+                self.note.write_text(str(seconds))
+
+    def test_run_leaves_a_record_without_a_time_to_setup_while_the_prefix_carries_the_runners(self):
+        self.follows()
+        marker, recorded = self.pfx / en.profiles.MARKER, self.record()
+        earlier = {key: recorded[key] for key in ("install_dir", "install_tree", "profile_sha256", "shape", "prerequisites",
+                                                  "program", "program_version")}
+        for note in ("1000", "disable"):
+            with self.subTest(note=note):
+                marker.write_text(json.dumps(earlier))
+                self.note.write_text(note)
+                before = en.profiles.treehash.snapshot(self.pfx)
+                self.assertEqual((self.launched(), self.ran), ("", []))
+                self.assertEqual(en.profiles.treehash.compare(self.pfx, before), [])
+        marker.write_text(json.dumps(earlier))
+        self.note.write_text("1000")
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        self.assertEqual((self.ran, self.record()["wine_inf"]), (self.settings, 1000))
+
+    def test_run_takes_up_what_a_start_without_it_left(self):
+        self.follows()
+        self.note.write_text("1500")
+        with en.rebuild.lock(self.data):
+            self.assertIn("another setup is running", self.launched())
+        self.note.write_text("1000")  # Wine at that start
+        os.utime(self.note, (5, 5))
+        self.assertIn("are written again", self.launched())
+        self.assertEqual(self.ran, self.settings)
+        self.assertEqual((self.launched(), self.ran), ("", []))
+
+    def test_run_starts_all_the_same_when_the_settings_cannot_be_written(self):
+        self.follows()
+        os.utime(self.inf, (2000, 2000))
+        before = en.profiles.treehash.snapshot(self.pfx)
+        with self.subTest("the app runs"):
+            child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+                                     env={**os.environ, "WINEPREFIX": str(self.pfx)})
+            said = self.launched()
+            child.stdin.close()
+            child.wait(10)
+            self.assertIn("a program still runs in it", said)
+            self.assertIn("run ./setup to write them again", said)
+            self.assertEqual(self.ran, [])
+            self.assertEqual(en.profiles.treehash.compare(self.pfx, before), [])
+        with self.subTest("setup runs"):
+            with en.rebuild.lock(self.data):
+                said = self.launched()
+            self.assertIn("another setup is running", said)
+            self.assertIn("run ./setup to write them again", said)
+            self.assertEqual(self.ran, [])
+        with self.subTest("the profile changed too"):
+            profile = self.profile.read_text()
+            self.profile.write_text(json.dumps({**json.loads(profile), "windows_version": "win11"}))
+            said = self.launched()
+            self.profile.write_text(profile)
+            self.assertIn("run ./setup to write them again", said)
+            self.assertEqual(self.ran, [])
+            self.assertEqual(en.profiles.treehash.compare(self.pfx, before), [])
+        with self.subTest("the app's folder changed"):
+            data = self.app.read_bytes()
+            self.app.write_bytes(data + b"x")
+            said = self.launched()
+            self.app.write_bytes(data)
+            self.assertIn("run ./setup to write them again", said)
+            self.assertEqual(self.ran, [])
+            self.assertEqual(en.profiles.treehash.compare(self.pfx, before), [])
+        with self.subTest("a step fails"):
+            self.failing = "winecfg"
+            self.assertIn("run ./setup to write them again", self.launched())
+            record = self.record()
+            self.assertEqual((record["profile_sha256"], record["shape"], record.get("wine_inf")), ("", None, None))
+            self.failing = None
+        with self.subTest("the record cannot be written"):
+            write, records = en.profiles.write_marker, []
+            def full(prefix, record):
+                records.append(record)
+                if len(records) == 2:
+                    raise OSError(28, "No space left on device")
+                write(prefix, record)
+            with patch.object(en.profiles, "write_marker", full):
+                said = self.launched()
+            self.assertIn("No space left on device", said)
+            self.assertNotIn("are written again", said)
+        with self.subTest("a setup ended in the meantime"):
+            take = en.rebuild.lock
+            @contextlib.contextmanager
+            def lock(data):
+                with take(data):
+                    self.record(note="of that setup")
+                    yield
+            with patch.object(en.rebuild, "lock", lock):
+                self.assertIn("the settings are written again", self.launched())
+            self.assertEqual(self.record()["note"], "of that setup")
+            self.record(profile_sha256="", wine_inf="gone", wine_inf_noted="gone")
+        with self.subTest("the next start takes it up"):
+            self.assertIn("the settings are written again", self.launched())
+            self.assertEqual(self.ran, self.updates + self.settings)
+            self.assertEqual((self.launched(), self.ran), ("", []))
+
+    def test_run_leaves_what_is_not_settings_to_setup(self):
+        self.follows()
+        os.utime(self.inf, (2000, 2000))
+        with self.subTest("a prerequisite that has not run"):
+            profile, marker = self.profile.read_text(), (self.pfx / en.profiles.MARKER).read_bytes()
+            self.profile.write_text(json.dumps({**json.loads(profile), "prerequisites": [
+                {"name": "runtime.exe", "url": "https://example.invalid/runtime.exe", "sha256": "0" * 64, "args": ["/quiet"]}]}))
+            self.record(profile_sha256="")
+            self.assertIn("run ./setup to write them again", self.launched())
+            self.assertEqual(self.ran, [])
+            self.profile.write_text(profile)
+            (self.pfx / en.profiles.MARKER).write_bytes(marker)
+        with self.subTest("a runner without a version"):
+            version = self.data / "runners/patched/version"
+            text = version.read_text()
+            version.unlink()
+            self.assertNotIn("settings", self.launched())
+            self.assertEqual(self.ran, [])
+            version.write_text(text)
+        with self.subTest("a prefix of a newer runner"):
+            marker = self.pfx / en.prefix.MARKER
+            marker.write_text(json.dumps({"stamp": 999, "runner": "newer"}))
+            before = en.profiles.treehash.snapshot(self.pfx)
+            self.launched()
+            self.assertEqual(self.ran, [])
+            self.assertEqual(en.profiles.treehash.compare(self.pfx, before), [])
+        for name, text in (("no record", None), ("an unreadable record", "{")):
+            with self.subTest(name):
+                (self.pfx / en.profiles.MARKER).unlink(missing_ok=True)
+                if text:
+                    (self.pfx / en.profiles.MARKER).write_text(text)
+                self.launched()
+                self.assertEqual(self.ran, [])
 
     def test_opencl_vendor_list_is_rebuilt_without_rusticl(self):
         host = self.root / "vendors"

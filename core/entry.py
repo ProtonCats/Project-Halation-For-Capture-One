@@ -346,13 +346,14 @@ def run_main(argv=None):
     args = parser.parse_args(argv[:boundary])
     try:
         data = data_directory(args.data)
-        profile = profiles.load_profile(PROFILE.read_bytes())
+        raw = PROFILE.read_bytes()
+        profile = profiles.load_profile(raw)
         if not (data / "runners/patched").is_dir() and os.path.lexists(data / rebuild.STAGING):
             with rebuild.lock(data):  # setup was stopped in the middle of a switch
                 rebuild.recover(data)
         program = executable(data / "pfx", profile)
-        if profiles.overwritten(data / "pfx", data / "runners/patched"):
-            print("run: a runner set some of the app's settings anew; run ./setup to write them again", file=sys.stderr)
+        profiles.follow(data / "pfx", data / "runners/patched", raw, rebuild.lock(data),
+                        lambda text: print(f"run: {text}", file=sys.stderr, flush=True))
         vendors = opencl_vendors(data)
         if vendors is None:
             print("run: the host lists no OpenCL driver (/etc/OpenCL/vendors); image processing stays on the CPU",
