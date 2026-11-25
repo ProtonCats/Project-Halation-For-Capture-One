@@ -38,6 +38,8 @@ How each piece of Halation works, for contributors and anyone curious. The front
 - On X11 `--expect faded` needs a compositor for `--target self`, and on unpatched Wine for the other two as well.
 - A run that dies in a present prints no result and leaves no result file. `0007` is the fix; `0008` makes constant-alpha windows reach the same copy.
 
+`repro/p15-class-race/` registers and unregisters window classes on `--makers` threads while `--lookers` threads ask for one that does not exist. A thread that makes no round for `--stall` milliseconds is stuck and fails the run; without `0013` that takes less than a second.
+
 ## Building the runner
 
 `core/runner.py` rebuilds the Wine DLLs that `patches/` changes, for the Proton runner pinned in `core/runner/`, and puts them on top of an installed copy of that runner:
@@ -51,7 +53,7 @@ core/runner.py assemble --pins core/runner/ge-proton11-12.json --work /tmp/runne
 
 `fetch` downloads the pinned release and its published SHA-512 checksum, verifies it, and installs it under `--dest` in a folder named for the tag. It refuses an existing folder or an unsafe archive and removes partial downloads on failure.
 
-Unix patches (the window drivers, `0006` to `0011`, and `wined3d`, `0012`, which GE changes beyond what PE mode replays) use a separate work directory and GE's full pinned Wine preparation. `./setup` builds and assembles the PE mode first, then overlays the Unix mode when required:
+Unix patches (the window drivers, `0006` to `0011`; `wined3d`, `0012`, which GE changes beyond what PE mode replays; `win32u`, `0013`) use a separate work directory and GE's full pinned Wine preparation. `./setup` builds and assembles the PE mode first, then overlays the Unix mode when required:
 
 ```sh
 core/runner.py build --mode unix --pins core/runner/ge-proton11-12.json --work /tmp/runner-work-unix --base runners/patched-pe

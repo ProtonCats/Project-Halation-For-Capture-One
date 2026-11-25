@@ -48,8 +48,8 @@ class PatchHunks(unittest.TestCase):
         self.assertEqual([(p.name[:4], modules) for p, modules in unix],
                          [("0006", ["winex11.drv"]), ("0007", ["winex11.drv"]), ("0008", ["winex11.drv"]), ("0009", ["winewayland.drv"]),
                           ("0010", ["winewayland.drv", "winex11.drv"]), ("0011", ["winex11.drv"]),
-                          ("0012", ["wined3d"])])
-        self.assertFalse(any(p.name.startswith(("0006", "0007", "0008", "0009", "0010", "0011", "0012"))
+                          ("0012", ["wined3d"]), ("0013", ["win32u"])])
+        self.assertFalse(any(p.name.startswith(("0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013"))
                              for p, _ in runner.mode_patches(patches, "pe")))
 
     def test_a_miscounted_header_is_caught(self):

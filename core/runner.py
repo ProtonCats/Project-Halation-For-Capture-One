@@ -39,19 +39,22 @@ CONFIGURE = ["--enable-archs=x86_64", "--disable-tests", "--without-x", "--witho
 
 
 # Built from GE's fully prepared tree (GE changes them beyond what PE mode can replay), Unix side or not.
-UNIX_MODULES = {"winex11.drv", "winewayland.drv", "wined3d"}
+UNIX_MODULES = {"winex11.drv", "winewayland.drv", "wined3d", "win32u"}
 UNIX_CONFIGURE = ["--enable-archs=x86_64", "--enable-win64", "--disable-tests", "--with-x",
                   "--with-vulkan", "--with-wayland", "--with-opencl", "--without-ffmpeg",
                   # This Wine's configure.ac lacks the Linux libOpenCL check, so opencl.so would link without it.
                   "OPENCL_LIBS=-lOpenCL"]
-UNIX_FILES = {"winex11.so": "files/lib/wine/x86_64-unix/winex11.so",
+WIN32U = "files/lib/wine/x86_64-unix/win32u.so"
+UNIX_FILES = {"win32u.so": WIN32U,
+              "winex11.so": "files/lib/wine/x86_64-unix/winex11.so",
               "winex11.drv": "files/lib/wine/x86_64-windows/winex11.drv",
               "winewayland.so": "files/lib/wine/x86_64-unix/winewayland.so",
               "winewayland.drv": "files/lib/wine/x86_64-windows/winewayland.drv",
               "opencl.so": "files/lib/wine/x86_64-unix/opencl.so",
               "opencl.dll": "files/lib/wine/x86_64-windows/opencl.dll",
               "wined3d.dll": "files/lib/wine/x86_64-windows/wined3d.dll"}
-UNIX_TARGETS = {"winex11.so": "dlls/winex11.drv/winex11.so",
+UNIX_TARGETS = {"win32u.so": "dlls/win32u/win32u.so",
+                "winex11.so": "dlls/winex11.drv/winex11.so",
                 "winex11.drv": "dlls/winex11.drv/x86_64-windows/winex11.drv",
                 "winewayland.so": "dlls/winewayland.drv/winewayland.so",
                 "winewayland.drv": "dlls/winewayland.drv/x86_64-windows/winewayland.drv",
@@ -440,7 +443,7 @@ def unix_pins(pins):
     if type(spec.get("driver_version")) is not int or spec["driver_version"] < 0:
         die("missing or invalid Unix pin: driver_version")
     for group, keys in (("xml_sha256", ("vk.xml", "video.xml")),
-                        ("base_sha256", (*UNIX_FILES.values(), "files/lib/wine/x86_64-unix/win32u.so", "proton"))):
+                        ("base_sha256", (*UNIX_FILES.values(), "proton"))):
         if not isinstance(spec.get(group), dict):
             die(f"missing Unix pin: {group}")
         for key in keys:
@@ -491,6 +494,11 @@ def call_version(path, symbol, callee="__wine_set_user_driver"):
     return values[0]
 
 
+def library_names(path):
+    """The shared libraries a file names, also those it only loads at run time; configure leaves out what it does not find."""
+    return {name.decode() for name in re.findall(rb"lib[\w+-]+\.so(?:\.[0-9]+)*", Path(path).read_bytes())}
+
+
 def unix_versions(work, base, pins):
     text = (work / "source/wine/include/wine/gdi_driver.h").read_text()
     values = re.findall(r"^#define WINE_GDI_DRIVER_VERSION\s+([0-9]+)\s*$", text, re.M)
@@ -499,7 +507,8 @@ def unix_versions(work, base, pins):
     versions = [int(values[0]),
                 symbol_version(work / "out/winex11.so", "init_user_driver", "mov"),
                 call_version(work / "out/winewayland.so", "waylanddrv_unix_init"),
-                symbol_version(base / "files/lib/wine/x86_64-unix/win32u.so", "__wine_set_user_driver", "cmp")]
+                symbol_version(base / WIN32U, "__wine_set_user_driver", "cmp"),
+                symbol_version(work / "out/win32u.so", "__wine_set_user_driver", "cmp")]
     if any(value != pins["unix"]["driver_version"] for value in versions):
         die(f"driver version mismatch: header/built/base {versions}")
     return versions[0]
@@ -620,6 +629,9 @@ def build_unix(args):
         shutil.copyfile(build / target, out / name)
     if "clGetPlatformIDs" not in undefined_symbols(out / "opencl.so"):
         die("opencl.so was built without the host OpenCL loader (no clGetPlatformIDs import)")
+    left_out = library_names(base / WIN32U) - library_names(out / "win32u.so")
+    if left_out:
+        die("win32u.so was built without " + ", ".join(sorted(left_out)))
     version = unix_versions(work, base, pins)
     record = {"identity": identity, "driver_version": version,
               "artifacts": {name: sha256(out / name) for name in UNIX_FILES}}

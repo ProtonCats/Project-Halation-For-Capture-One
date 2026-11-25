@@ -1,0 +1,113 @@
+SPDX-FileCopyrightText: 2026 Yongjie Yao (upstream Wine)
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+win32u: Hold the user lock while a class is registered or unregistered.
+
+Backport of upstream Wine commit 27aad48fa80e5422cc6ff27f0f5b00450f667645
+(Yongjie Yao, 2026-03-24, merge request 10271), which the GE-Proton11-12 base
+does not include. Upstream title: "win32u: Fixed thread safety issues with
+NtUserRegistClassExWOW and NtUserUnregisterClass."
+
+NtUserUnregisterClass lets the server free the class's shared object before it
+takes the user lock and removes the class from the list. A thread that walks
+the list in between reads id 0 from the freed object, takes that for "not read
+yet" and spins for ever, holding the lock that the first thread waits for. The
+program then hangs with one busy thread; at its start, as an empty window.
+
+Shown by repro/p15-class-race. Drop this patch once the pinned base includes
+the upstream commit.
+Applies to: Valve Wine fda79a5 (GE-Proton11-12) after GE's preparation, in order after 0012.
+
+--- a/dlls/win32u/class.c
++++ b/dlls/win32u/class.c
+@@ -548,6 +548,14 @@
+ 
+     class->local      = !is_builtin && !(wc->style & CS_GLOBALCLASS);
+ 
++    /* Other non-null values must be set by caller */
++    if (wc->hIcon && !wc->hIconSm)
++        sm_icon = CopyImage( wc->hIcon, IMAGE_ICON,
++                             get_system_metrics( SM_CXSMICON ),
++                             get_system_metrics( SM_CYSMICON ),
++                             LR_COPYFROMRESOURCE );
++
++    user_lock();
+     SERVER_START_REQ( create_class )
+     {
+         req->local      = class->local;
+@@ -563,11 +571,7 @@
+         atom = reply->atom;
+     }
+     SERVER_END_REQ;
+-    if (!ret)
+-    {
+-        free( class );
+-        return 0;
+-    }
++    if (!ret) goto failed;
+ 
+     if (!(shared = find_shared_session_object( locator.id, locator.offset )))
+     {
+@@ -579,18 +583,10 @@
+             wine_server_call( req );
+         }
+         SERVER_END_REQ;
+-        free( class );
+-        return 0;
+-    }
+-
+-    /* Other non-null values must be set by caller */
+-    if (wc->hIcon && !wc->hIconSm)
+-        sm_icon = CopyImage( wc->hIcon, IMAGE_ICON,
+-                             get_system_metrics( SM_CXSMICON ),
+-                             get_system_metrics( SM_CYSMICON ),
+-                             LR_COPYFROMRESOURCE );
+-
+-    user_lock();
++
++        goto failed;
++    }
++
+     if (class->local) list_add_head( &class_list, &class->entry );
+     else list_add_tail( &class_list, &class->entry );
+ 
+@@ -608,6 +604,13 @@
+     class->shared        = shared;
+     release_class_ptr( class );
+     return atom;
++
++failed:
++    user_unlock();
++    NtUserDestroyCursor( sm_icon, 0 );
++    free( class );
++    return 0;
++
+ }
+ 
+ /***********************************************************************
+@@ -621,6 +624,8 @@
+ 
+     /* create the desktop window to trigger builtin class registration */
+     get_desktop_window();
++
++    user_lock();
+ 
+     SERVER_START_REQ( destroy_class )
+     {
+@@ -629,11 +634,14 @@
+         if (!wine_server_call_err( req )) class = wine_server_get_ptr( reply->client_ptr );
+     }
+     SERVER_END_REQ;
+-    if (!class) return FALSE;
++    if (!class)
++    {
++        user_unlock();
++        return FALSE;
++    }
+ 
+     TRACE( "%p\n", class );
+ 
+-    user_lock();
+     if (class->dce) free_dce( class->dce, 0, &drawables );
+     list_remove( &class->entry );
+     if (class->hbrBackground > (HBRUSH)(COLOR_GRADIENTINACTIVECAPTION + 1))
