@@ -72,7 +72,7 @@ Open a terminal and run the command for your distribution. Only Fedora-based sys
 sudo dnf install git-core curl autoconf perl-interpreter bison flex make gcc clang lld llvm binutils patch \
   pkgconf-pkg-config python3 libX11-devel libXi-devel libXext-devel libXrandr-devel libXrender-devel \
   libXfixes-devel libXcursor-devel libXcomposite-devel libXinerama-devel vulkan-loader-devel wayland-devel \
-  libxkbcommon-devel ocl-icd-devel glibc-devel
+  libxkbcommon-devel ocl-icd-devel freetype-devel fontconfig-devel dbus-devel libglvnd-devel glibc-devel
 ```
 
 Nobara already includes `umu-launcher`. On Fedora, install the `.rpm` for your release from the [umu-launcher releases](https://github.com/Open-Wine-Components/umu-launcher/releases).
@@ -82,7 +82,8 @@ Nobara already includes `umu-launcher`. On Fedora, install the `.rpm` for your r
 ```sh
 sudo apt install git curl autoconf perl bison flex make gcc clang lld llvm binutils patch pkg-config python3 \
   libx11-dev libxi-dev libxext-dev libxrandr-dev libxrender-dev libxfixes-dev libxcursor-dev libxcomposite-dev \
-  libxinerama-dev libvulkan-dev libwayland-dev libxkbcommon-dev libxkbregistry-dev ocl-icd-opencl-dev libc6-dev
+  libxinerama-dev libvulkan-dev libwayland-dev libxkbcommon-dev libxkbregistry-dev ocl-icd-opencl-dev \
+  libfreetype-dev libfontconfig-dev libdbus-1-dev libegl-dev libc6-dev
 ```
 
 Then install `umu-launcher` from the `.deb` packages on its [releases page](https://github.com/Open-Wine-Components/umu-launcher/releases).
@@ -92,7 +93,7 @@ Then install `umu-launcher` from the `.deb` packages on its [releases page](http
 ```sh
 sudo pacman -S --needed git curl autoconf perl bison flex make gcc clang lld llvm binutils patch pkgconf python \
   umu-launcher libx11 libxi libxext libxrandr libxrender libxfixes libxcursor libxcomposite libxinerama \
-  vulkan-icd-loader vulkan-headers wayland libxkbcommon ocl-icd opencl-headers
+  vulkan-icd-loader vulkan-headers wayland libxkbcommon ocl-icd opencl-headers freetype2 fontconfig dbus libglvnd
 ```
 
 For GPU image processing, your graphics driver's OpenCL support must be installed too; it is often a separate package. Without it, Capture One processes images on the CPU.

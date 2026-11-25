@@ -58,6 +58,10 @@ UNIX_TARGETS = {"winex11.so": "dlls/winex11.drv/winex11.so",
                 "opencl.so": "dlls/opencl/opencl.so",
                 "opencl.dll": "dlls/opencl/x86_64-windows/opencl.dll",
                 "wined3d.dll": "dlls/wined3d/x86_64-windows/wined3d.dll"}
+UNIX_TOOLS = ["bash", "patch", "pkg-config", "objdump"]
+# Wine's configure stops without FreeType and silently leaves out what else it does not find.
+UNIX_PACKAGES = ["x11", "xi", "xext", "xrandr", "xrender", "xfixes", "xcursor", "xcomposite", "xinerama", "vulkan",
+                 "wayland-client", "xkbcommon", "xkbregistry", "OpenCL", "freetype2", "fontconfig", "dbus-1", "egl"]
 # GE's proton script forces opencl to "n,d" (disabled unless a native DLL exists); this line is made a no-op.
 OPENCL_OVERRIDE = 'self.dlloverrides["opencl"] = "n,d"'
 
@@ -578,19 +582,24 @@ def allow_opencl(script):
     return "".join(lines)
 
 
+def missing_packages():
+    """The development packages of the Unix build that pkg-config does not find; without pkg-config, that is the tool to name."""
+    if not shutil.which("pkg-config"):
+        return []
+    return [name for name in UNIX_PACKAGES if subprocess.run(["pkg-config", "--exists", name]).returncode]
+
+
 def build_unix(args):
     pins, patches, identity = unix_identity(args.pins)
     work, base = Path(args.work).resolve(), Path(args.base).resolve()
     check_identity(work / ".patched", identity)
     unix_base(pins, base)
-    required = ["bash", "patch", "pkg-config", "objdump"]
-    missing = [tool for tool in required if not shutil.which(tool)]
+    missing = [tool for tool in UNIX_TOOLS if not shutil.which(tool)]
     if missing:
         die("missing Unix tools: " + ", ".join(missing))
-    # Refuse silently disabled input support before generating any build output.
-    packages = ["x11", "xi", "xext", "xrandr", "xrender", "xfixes", "xcursor", "xcomposite", "xinerama", "vulkan",
-                "wayland-client", "xkbcommon", "xkbregistry", "OpenCL"]
-    run(["pkg-config", "--exists", *packages])
+    lacking = missing_packages()
+    if lacking:
+        die("missing development packages (pkg-config names): " + ", ".join(lacking))
     work.mkdir(parents=True, exist_ok=True)
     log = work / "build.log"
     env, _ = check_tools(work)

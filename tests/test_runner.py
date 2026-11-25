@@ -623,6 +623,23 @@ class FetchRunner(Sandbox):
 if __name__ == "__main__":
     unittest.main()
 
+class Packages(unittest.TestCase):
+    def test_packages_are_asked_for_one_by_one(self):
+        def exists(command, **kwargs):
+            self.assertEqual(command[:2], ["pkg-config", "--exists"])
+            return subprocess.CompletedProcess(command, int(command[2] in ("xi", "freetype2")))
+        with patch.object(runner.shutil, "which", return_value="/usr/bin/pkg-config"), \
+                patch.object(runner.subprocess, "run", side_effect=exists) as asked:
+            self.assertEqual(runner.missing_packages(), ["xi", "freetype2"])
+        self.assertEqual([c.args[0][2] for c in asked.call_args_list], runner.UNIX_PACKAGES)
+        with patch.object(runner.shutil, "which", return_value=None):
+            self.assertEqual(runner.missing_packages(), [])
+
+    def test_what_configure_leaves_out_or_stops_for_is_asked_for(self):
+        for name in ("freetype2", "fontconfig", "dbus-1", "egl", "xi", "OpenCL"):
+            self.assertIn(name, runner.UNIX_PACKAGES)
+
+
 class UnixMode(Sandbox):
     def setUp(self):
         super().setUp()
@@ -668,6 +685,7 @@ class UnixMode(Sandbox):
         self.enterContext(patch.object(runner, "check_tools", return_value=({}, "ar")))
         self.enterContext(patch.object(runner.shutil, "which", return_value="available"))
         self.prepare = self.enterContext(patch.object(runner, "prepare_unix", return_value=self.work / "source/wine"))
+        self.enterContext(patch.object(runner, "missing_packages", return_value=[]))
         self.enterContext(patch.object(runner, "apply"))
         def disassemble(cmd, **kwargs):
             self.assertEqual(cmd[0], "objdump")
@@ -855,9 +873,9 @@ class UnixMode(Sandbox):
         self.assertEqual(before, {p.name: p.read_bytes() for p in shared.iterdir()})
         self.run.assert_not_called()
 
-    def test_missing_xinput_packages_refuse_before_prepare(self):
-        self.run.side_effect = SystemExit("missing xi")
-        with self.assertRaisesRegex(SystemExit, "missing xi"):
+    def test_missing_packages_are_all_named_before_prepare(self):
+        with patch.object(runner, "missing_packages", return_value=["xi", "freetype2"]), \
+                self.assertRaisesRegex(SystemExit, r"missing development packages \(pkg-config names\): xi, freetype2"):
             runner.build(self.args)
         self.prepare.assert_not_called()
         self.assertFalse((self.work / "out").exists())

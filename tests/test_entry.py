@@ -37,6 +37,7 @@ class Entry(unittest.TestCase):
         self.enterContext(patch.object(en.runner, "our_patches", return_value=[(self.patch_file, ["sample"])]))
         self.enterContext(patch.object(en.shutil, "which", return_value="available"))
         self.enterContext(patch.object(en.runner, "llvm_ar", return_value="available"))
+        self.enterContext(patch.object(en.runner, "missing_packages", return_value=[]))
         self.enterContext(patch.object(en.runner, "main", side_effect=self.stage))
         self.enterContext(patch.object(en.profiles, "main", side_effect=self.stage))
         self.stdout = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -342,6 +343,25 @@ class Entry(unittest.TestCase):
             self.assertEqual(self.setup(), 2)
         for name in ("autoconf", "autoheader", "llvm-ar"):
             self.assertIn(name, self.stderr.getvalue())
+        self.assertFalse(self.data.exists())
+
+    def test_preflight_names_every_missing_tool_and_package_at_once(self):
+        self.forbid_work = True
+        with patch.object(en.shutil, "which", side_effect=lambda n: None if n in ("flex", "objdump") else "ok"), \
+             patch.object(en.runner, "missing_packages", return_value=["freetype2", "egl"]):
+            self.assertEqual(self.setup(), 2)
+        errors = self.stderr.getvalue()
+        self.assertIn("missing required tools: flex, objdump", errors)
+        self.assertIn("missing development packages (pkg-config names): freetype2, egl", errors)
+        self.assertIn("README.md", errors)
+        self.assertFalse(self.data.exists())
+
+    def test_packages_alone_stop_setup_too(self):
+        self.forbid_work = True
+        with patch.object(en.runner, "missing_packages", return_value=["freetype2"]):
+            self.assertEqual(self.setup(), 2)
+        self.assertNotIn("missing required tools", self.stderr.getvalue())
+        self.assertIn("freetype2", self.stderr.getvalue())
         self.assertFalse(self.data.exists())
 
     def test_setup_needs_no_ip_tool(self):

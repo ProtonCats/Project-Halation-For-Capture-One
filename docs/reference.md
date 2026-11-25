@@ -50,7 +50,7 @@ core/runner.py build --mode unix --pins core/runner/ge-proton11-12.json --work /
 core/runner.py assemble --mode unix --pins core/runner/ge-proton11-12.json --work /tmp/runner-work-unix --base runners/patched-pe --out runners/patched
 ```
 
-**Tools and packages.** Unix mode requires bash, patch, pkg-config and GNU objdump in addition to the PE tools. Install development packages for X11, Xi, Xext, Xrandr, Xrender, Xfixes, Xcursor, Xcomposite, Xinerama, Vulkan, Wayland client, xkbcommon, xkbregistry and OpenCL (the ICD loader, `pkg-config OpenCL`), plus libc development files.
+**Tools and packages.** Unix mode requires bash, patch, pkg-config and GNU objdump in addition to the PE tools. Install development packages for X11, Xi, Xext, Xrandr, Xrender, Xfixes, Xcursor, Xcomposite, Xinerama, Vulkan, Wayland client, xkbcommon, xkbregistry, OpenCL (the ICD loader, `pkg-config OpenCL`), FreeType, fontconfig, D-Bus and EGL, plus libc development files. `./setup` names every missing one before any work.
 
 **Build environment.** Job 17 used autoconf 2.72 and LLVM 22. Build in a Proton-compatible runtime/sysroot; arbitrary host builds can require newer system libraries.
 

@@ -68,11 +68,14 @@ def setup_main(argv=None):
     parser.add_argument("--data")
     args = parser.parse_args(argv)
     try:
-        missing = [name for name in runner.TOOLS + ["umu-run"] if not shutil.which(name)]
+        missing = [name for name in runner.TOOLS + runner.UNIX_TOOLS + ["umu-run"] if not shutil.which(name)]
         if not runner.llvm_ar():
             missing.append("llvm-ar")
-        if missing:
-            raise ValueError("missing required tools: " + ", ".join(missing))
+        lacking = runner.missing_packages()
+        if missing or lacking:
+            raise ValueError("; ".join(["missing required tools: " + ", ".join(missing)] * bool(missing)
+                                       + ["missing development packages (pkg-config names): " + ", ".join(lacking)] * bool(lacking))
+                             + ". README.md lists one command per distribution that installs them all")
         installer = Path(args.installer).resolve()
         if not installer.is_file():
             raise ValueError("a local installer file is required")
