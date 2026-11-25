@@ -548,6 +548,27 @@ class Entry(unittest.TestCase):
         self.assertIn("build failed with exit 4; run setup again", self.stderr.getvalue())
         self.assertEqual(self.setup(), 0, self.stderr.getvalue())
 
+    def test_a_step_that_stops_with_a_message_keeps_the_old_runner_and_says_so(self):
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+        old, tree = self.runner_bytes(), self.prefix_tree()
+        self.new_patch()
+        for step in ("build", "assemble"):
+            with self.subTest(step=step):
+                def action(args):
+                    if args[0] == step:
+                        sys.exit("runner.py: failed (1): a command")
+                    return self.stage(args)
+                with patch.object(en.runner, "main", side_effect=action):
+                    self.assertEqual(self.setup(), 2)
+                self.assertRegex(self.stderr.getvalue(), rf"a command\n{step}: failed \(\S+\)\nsetup: {step} failed with exit 1; "
+                                                         "the runner in use is unchanged, run setup again")
+                self.assertEqual(self.runner_bytes(), old)
+                self.assertEqual(en.profiles.treehash.compare(self.data / "pfx", tree), [])
+        for step in (None, 0):
+            with self.subTest(step=step), patch.object(en.runner, "main", side_effect=SystemExit(step)), self.assertRaises(SystemExit):
+                self.setup()
+        self.assertEqual(self.setup(), 0, self.stderr.getvalue())
+
     def test_a_set_made_in_place_by_an_earlier_setup_is_recognised(self):
         self.stage(["fetch"])
         self.stage(["build", "--work", str(self.data / "runner-work")])

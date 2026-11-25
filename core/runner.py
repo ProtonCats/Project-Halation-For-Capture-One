@@ -389,6 +389,7 @@ def assemble(args):
     expected = {f"{dll}.dll" for _, dlls in patches for dll in dlls}
     if {dll.name for dll in built} != expected:
         die("build output incomplete or unexpected; run build first")
+    out.parent.mkdir(parents=True, exist_ok=True)
     run(["cp", "-a", "--reflink=auto", str(base), str(out)])
     safe_library(out, lib)
     manifest = {"base": pins["ge_tag"], "patches": [p.name for p, _ in patches], "dlls": {}}

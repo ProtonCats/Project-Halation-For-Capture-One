@@ -190,7 +190,13 @@ def run_steps(steps, clear=None, advice=None):
                 clear(folder)
                 skipped = False
             if not skipped:
-                code = action(command)
+                try:
+                    code = action(command)
+                except SystemExit as stop:  # a message instead of a code
+                    if not advice or not stop.code:
+                        raise
+                    print(stop.code, file=sys.stderr)
+                    code = 1
                 finished = os.path.lexists(folder / profiles.MARKER)
                 if code:
                     end = f"; {advice}" if advice else "" if finished else f"; remove {folder} before retrying"

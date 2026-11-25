@@ -424,6 +424,13 @@ class RunnerOperations(Sandbox):
         self.assertEqual((base / lib / "sample.dll").read_bytes(), b"original")
         self.assertFalse((base / "halation-runner.json").exists())
 
+    def test_assemble_makes_the_folder_it_writes_into(self):
+        args, work, base, out, lib = self.assembly_fixture()
+        args.out = str(self.root / "staged/runners/assembled")
+        self.assertEqual(runner.assemble(args), 0)
+        self.assertEqual((Path(args.out) / lib / "sample.dll").read_bytes(), b"replacement")
+        self.assertEqual((Path(args.out) / "untouched").read_bytes(), b"keep")
+
     def test_assemble_replaces_only_copied_dll_and_records_both_hashes(self):
         args, work, base, out, lib = self.assembly_fixture()
         target = base / lib / "original.dll"
